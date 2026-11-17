@@ -399,6 +399,7 @@ def test_sbatch_refusal_is_rejected_with_subcode(message, subcode):
     failure = excinfo.value
     assert failure.code is FailureCode.SBATCH_REJECTED
     assert failure.subcode == subcode
+    assert failure.message == "Slurm rejected the job"
     assert failure.cause.message == stderr.strip()
     assert failure.cause.return_code == 1
     assert failure.cause.producer == "sbatch"
@@ -420,6 +421,7 @@ def test_unlisted_or_communication_error_is_submission_failed(stderr):
         SlurmLauncher().submit(Path("job.sh"))
     assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
     assert excinfo.value.subcode is None
+    assert excinfo.value.message == "sbatch failed"
 
 
 def test_sbatch_without_job_id_is_submission_failed_with_stdout():
@@ -427,6 +429,7 @@ def test_sbatch_without_job_id_is_submission_failed_with_stdout():
     with patch("subprocess.run", return_value=result), pytest.raises(SrtFailure) as excinfo:
         SlurmLauncher().submit(Path("job.sh"))
     assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
+    assert excinfo.value.message == "sbatch did not report a job id"
     assert excinfo.value.cause.message == "weird"
     assert excinfo.value.cause.return_code == 0
 
@@ -435,10 +438,11 @@ def test_sbatch_missing_binary_is_submission_failed():
     with patch("subprocess.run", side_effect=FileNotFoundError("sbatch")), pytest.raises(SrtFailure) as excinfo:
         SlurmLauncher().submit(Path("job.sh"))
     assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
+    assert excinfo.value.message == "Could not run sbatch"
     assert excinfo.value.cause.message == "sbatch"
 
 
 def test_silent_sbatch_failure_omits_cause_message():
     failure = launcher_mod.sbatch_failure(1, "", "")
-    assert failure.message == "sbatch did not report a job id"
+    assert failure.message == "sbatch failed"
     assert "message" not in failure.record()["cause"]

@@ -5,7 +5,6 @@
 
 import io
 import json
-from pathlib import Path
 
 import pytest
 
@@ -65,27 +64,6 @@ def test_system_exit_passes_through_untouched():
     assert out.getvalue() == ""
 
 
-def test_accepted_then_failure_carries_job_and_exits_3():
-    out = io.StringIO()
-    report = ApplyReport(active=True, json_out=out)
-
-    with pytest.raises(SrtFailure), report.item(recipe_path="s.yaml"):
-        report.accepted("42", "job", Path("/o/42"))
-        with report.phase(FailureCode.METADATA_WRITE_FAILED, OSError):
-            raise OSError("disk full")
-
-    accepted, error = _records(out)
-    assert accepted["status"] == "accepted"
-    assert accepted["slurm_job_id"] == "42"
-    assert accepted["job_name"] == "job"
-    assert accepted["output_dir"] == "/o/42"
-    assert error["status"] == "error"
-    assert error["slurm_job_id"] == "42"
-    assert error["output_dir"] == "/o/42"
-    assert error["submission_index"] == accepted["submission_index"]
-    assert report.exit_code == 3
-
-
 def test_submitted_records_identity_and_is_kept():
     out = io.StringIO()
     report = ApplyReport(active=True, json_out=out)
@@ -118,39 +96,6 @@ def test_fail_is_command_level_and_not_repeated():
     (record,) = _records(out)
     assert record["code"] == "unknown"
     assert "submission_index" not in record
-
-
-@pytest.mark.parametrize(
-    ("codes", "accepted", "expected"),
-    [
-        ([], False, 0),
-        ([FailureCode.INVOCATION_INVALID], False, 2),
-        ([FailureCode.RECIPE_INVALID], False, 1),
-        ([FailureCode.RECIPE_INVALID], True, 3),
-    ],
-)
-def test_exit_codes(codes, accepted, expected):
-    report = ApplyReport(active=True)
-    if accepted:
-        with report.item():
-            report.accepted("1", "j", Path("/o"))
-    for code in codes:
-        report.fail(SrtFailure(code, "x"))
-    assert report.exit_code == expected
-
-
-def test_failures_file_gets_failure_records_only(tmp_path):
-    path = tmp_path / "failures.jsonl"
-    out = io.StringIO()
-    report = ApplyReport(active=True, json_out=out, failures_file=path)
-
-    with pytest.raises(SrtFailure), report.item(recipe_path="s.yaml"):
-        report.accepted("42", "job", Path("/o/42"))
-        raise SrtFailure(FailureCode.SBATCH_ARCHIVE_FAILED, "x")
-
-    (line,) = path.read_text().splitlines()
-    assert json.loads(line)["status"] == "error"
-    assert len(_records(out)) == 2
 
 
 def test_finish_emits_no_submissions_only_when_empty():

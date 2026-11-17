@@ -4,6 +4,7 @@
 """Structured per-submission reporting for ``srtctl apply``."""
 
 import json
+import sys
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -49,9 +50,7 @@ class ApplyReport:
             failure = as_failure(exc)
             if not failure.reported:
                 failure.identity = {**self._identity(), **scope.job}
-                self._emit(failure.record(), failure=True)
-                failure.reported = True
-                self._failures.append(failure)
+                self.fail(failure)
             if failure is exc:
                 raise
             raise failure from exc
@@ -82,9 +81,8 @@ class ApplyReport:
                 "schema_version": RECORD_SCHEMA_VERSION,
                 "status": "accepted",
                 **self._identity(),
-                "slurm_job_id": slurm_job_id,
+                **job,
                 "job_name": job_name,
-                "output_dir": str(output_dir),
             }
         )
 
@@ -135,6 +133,9 @@ class ApplyReport:
             self.json_out.write(line + "\n")
             self.json_out.flush()
         if failure and self.failures_file is not None:
-            self.failures_file.parent.mkdir(parents=True, exist_ok=True)
-            with self.failures_file.open("a") as handle:
-                handle.write(line + "\n")
+            try:
+                self.failures_file.parent.mkdir(parents=True, exist_ok=True)
+                with self.failures_file.open("a") as handle:
+                    handle.write(line + "\n")
+            except OSError as e:
+                print(f"Could not write failure record to {self.failures_file}: {e}", file=sys.stderr)

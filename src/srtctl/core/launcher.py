@@ -60,9 +60,7 @@ SBATCH_REFUSALS: dict[str, str] = {
 def sbatch_failure(returncode: int | None, stdout: str, stderr: str) -> SrtFailure:
     """Classify a failed sbatch call: a listed controller refusal is ``sbatch_rejected``, anything else is not."""
     stderr = stderr.strip()
-    observed = stderr or stdout.strip()
-    message = observed or "sbatch did not report a job id"
-    cause = Cause(producer="sbatch", return_code=returncode, message=observed or None)
+    cause = Cause(producer="sbatch", return_code=returncode, message=stderr or stdout.strip() or None)
     refused = {
         line.removeprefix(_SBATCH_REFUSAL_PREFIX)
         for line in stderr.splitlines()
@@ -70,7 +68,13 @@ def sbatch_failure(returncode: int | None, stdout: str, stderr: str) -> SrtFailu
     }
     for subcode, text in SBATCH_REFUSALS.items():
         if text in refused:
-            return SrtFailure(FailureCode.SBATCH_REJECTED, message, subcode=subcode, cause=cause)
+            return SrtFailure(FailureCode.SBATCH_REJECTED, "Slurm rejected the job", subcode=subcode, cause=cause)
+    if returncode is None:
+        message = "Could not run sbatch"
+    elif returncode == 0:
+        message = "sbatch did not report a job id"
+    else:
+        message = "sbatch failed"
     return SrtFailure(FailureCode.SUBMISSION_FAILED, message, cause=cause)
 
 
@@ -190,7 +194,7 @@ class Launcher(ABC):
 
     @abstractmethod
     def submit(self, script_path: Path) -> str:
-        """Hand the rendered job script over and return the new job id."""
+        """Hand the rendered job script over and return the new job id; raise ``SrtFailure`` if submission fails."""
 
     def start(self, job_id: str, job_output_dir: Path) -> int | None:
         """Run a submitted job once its output directory is staged; None when the scheduler runs it."""

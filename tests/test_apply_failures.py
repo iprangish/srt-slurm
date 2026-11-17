@@ -47,11 +47,12 @@ def _apply(
     extra_patches: tuple = (),
     target: Path | str | None = None,
     args: tuple = (),
+    command: str = "apply",
 ) -> int:
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(yaml.dump(config or MINIMAL_CONFIG))
     monkeypatch.delenv("RUNNER_NAME", raising=False)
-    argv = ["srtctl", "apply", "-f", str(target or cfg), "-o", str(tmp_path), *args] + (["--json"] if json_mode else [])
+    argv = ["srtctl", command, "-f", str(target or cfg), "-o", str(tmp_path), *args] + (["--json"] if json_mode else [])
     monkeypatch.setattr(sys, "argv", argv)
     code = 0
     with (
@@ -82,7 +83,7 @@ def test_success_prints_accepted_then_submitted(monkeypatch, tmp_path, capsys):
     assert code == 0
     assert (accepted["status"], submitted["status"]) == ("accepted", "submitted")
     assert accepted["submission_index"] == submitted["submission_index"] == 1
-    assert accepted["output_dir"] == submitted["output_dir"]
+    assert (accepted["job_name"], accepted["output_dir"]) == (submitted["job_name"], submitted["output_dir"])
 
 
 def test_federated_sbatch_output_parses_job_id(monkeypatch, tmp_path, capsys):
@@ -174,24 +175,14 @@ def test_preflight_failure_keeps_every_issue(monkeypatch, tmp_path, capsys):
     assert exit_code == 1
 
 
+def _setup_incomplete() -> MagicMock:
+    return MagicMock(side_effect=SrtFailure(FailureCode.SETUP_INCOMPLETE, "Required binaries not found"))
+
+
 def test_missing_setup_binaries_is_setup_incomplete(monkeypatch, tmp_path, capsys):
-    cfg = tmp_path / "cfg.yaml"
-    cfg.write_text(yaml.dump(MINIMAL_CONFIG))
-    monkeypatch.setattr(sys, "argv", ["srtctl", "apply", "-f", str(cfg), "-o", str(tmp_path), "--json"])
-    root = tmp_path / "root"
-    root.mkdir()
-    with (
-        patch(
-            "srtctl.cli.submit.get_srtslurm_setting",
-            side_effect=lambda k, d=None: str(root) if k == "srtctl_root" else d,
-        ),
-        patch("srtctl.cli.submit._assert_preflight_passed"),
-        pytest.raises(SystemExit) as excinfo,
-    ):
-        submit_cli.main()
+    assert _apply(monkeypatch, tmp_path, setup={"new": _setup_incomplete()}) == 1
     (record,) = _records(capsys)
     assert record["code"] == "setup_incomplete"
-    assert excinfo.value.code == 1
 
 
 def test_unsupported_schema(monkeypatch, tmp_path, capsys):
@@ -239,22 +230,11 @@ def test_docker_foreground_run_failure_keeps_job_exit_code(monkeypatch, tmp_path
 
 
 def test_directory_aborts_on_setup_incomplete(monkeypatch, tmp_path, capsys):
-    recipes = tmp_path / "recipes"
-    recipes.mkdir()
-    for name in ("a.yaml", "b.yaml"):
-        (recipes / name).write_text(yaml.dump(MINIMAL_CONFIG))
-    monkeypatch.setattr(sys, "argv", ["srtctl", "apply", "-f", str(recipes), "-o", str(tmp_path), "--json"])
-    validate = MagicMock(side_effect=SrtFailure(FailureCode.SETUP_INCOMPLETE, "Required binaries not found"))
-    with (
-        patch("srtctl.cli.submit.get_srtslurm_setting", return_value=None),
-        patch("srtctl.cli.submit._assert_preflight_passed"),
-        patch("srtctl.cli.submit.validate_setup", validate),
-        pytest.raises(SystemExit) as excinfo,
-    ):
-        submit_cli.main()
+    validate = _setup_incomplete()
+    directory = _recipes(tmp_path, a=MINIMAL_CONFIG, b=MINIMAL_CONFIG)
+    assert _apply(monkeypatch, tmp_path, setup={"new": validate}, target=directory) == 1
     (record,) = _records(capsys)
     assert record["code"] == "setup_incomplete"
-    assert excinfo.value.code == 1
     assert validate.call_count == 1
 
 
@@ -381,16 +361,20 @@ def test_failures_file_written_with_and_without_json(monkeypatch, tmp_path, json
     assert record["status"] == "error"
 
 
+def test_unwritable_failures_file_keeps_the_error_path(monkeypatch, tmp_path, capsys):
+    blocker = tmp_path / "blocker"
+    blocker.write_text("")
+    args = ("--failures-file", str(blocker / "failures.jsonl"))
+    exit_code = _apply(monkeypatch, tmp_path, args=args, extra_patches=(_fail_open_json(),))
+    captured = capsys.readouterr()
+    assert [json.loads(line)["status"] for line in captured.out.splitlines()] == ["accepted", "error"]
+    assert "Could not write failure record" in captured.err and "Traceback" not in captured.err
+    assert exit_code == 3
+
+
 def test_dry_run_directory_with_bad_file_still_exits_0(monkeypatch, tmp_path):
     directory = _recipes(tmp_path, a=MINIMAL_CONFIG, b="name: [broken\n")
-    monkeypatch.setattr(sys, "argv", ["srtctl", "dry-run", "-f", str(directory)])
-    with patch("srtctl.cli.submit.get_srtslurm_setting", return_value=None), patch("srtctl.cli.submit.validate_setup"):
-        try:
-            submit_cli.main()
-            code = 0
-        except SystemExit as exc:
-            code = exc.code or 0
-    assert code == 0
+    assert _apply(monkeypatch, tmp_path, command="dry-run", json_mode=False, target=directory) == 0
 
 
 def test_set_parse_error_reaches_failures_file(monkeypatch, tmp_path):

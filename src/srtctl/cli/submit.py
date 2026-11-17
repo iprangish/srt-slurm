@@ -1385,10 +1385,9 @@ def submit_with_orchestrator(
                 runtime_config_path.write_text(resolved_runtime_config_text)
         with _report.phase(FailureCode.SBATCH_ARCHIVE_FAILED, OSError):
             shutil.copy(script_path, job_output_dir / "sbatch_script.sh")
-        with _report.phase(FailureCode.JOB_PREPARATION_FAILED, OSError):
-            git_sources = git_snapshot_sources_from_extra_mounts(config)
-            if git_sources:
-                write_git_state_snapshot(job_output_dir / GIT_STATE_FILENAME, git_sources)
+        git_sources = git_snapshot_sources_from_extra_mounts(config)
+        if git_sources:
+            write_git_state_snapshot(job_output_dir / GIT_STATE_FILENAME, git_sources)
 
         # Build comprehensive job metadata
         metadata: dict[str, Any] = {
