@@ -9,7 +9,7 @@ import json
 import pytest
 
 from srtctl.cli.apply_report import ApplyReport
-from srtctl.contract.failures import FailureCode, SrtFailure
+from srtctl.contract.failures import FailureCode, SrtFailure, reraise_as
 
 
 def _records(stream: io.StringIO) -> list[dict]:
@@ -20,11 +20,7 @@ def test_inactive_report_is_a_passthrough():
     out = io.StringIO()
     report = ApplyReport(json_out=out)
 
-    with (
-        pytest.raises(ValueError, match="boom"),
-        report.item(recipe_path="s.yaml"),
-        report.phase(FailureCode.RECIPE_INVALID, ValueError),
-    ):
+    with pytest.raises(ValueError, match="boom"), report.item(recipe_path="s.yaml"):
         raise ValueError("boom")
 
     assert out.getvalue() == ""
@@ -39,7 +35,7 @@ def test_item_indexes_and_identity_merge():
         pytest.raises(SrtFailure),
         report.item(recipe_path="s.yaml"),
         report.item(parameters={"c": 4}),
-        report.phase(FailureCode.RECIPE_INVALID, ValueError),
+        reraise_as(FailureCode.RECIPE_INVALID, ValueError),
     ):
         raise ValueError("bad")
     with pytest.raises(RuntimeError), report.item(recipe_path="s.yaml"):

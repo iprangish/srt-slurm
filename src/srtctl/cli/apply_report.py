@@ -57,19 +57,6 @@ class ApplyReport:
         finally:
             self._scopes.pop()
 
-    @contextmanager
-    def phase(self, code: FailureCode, *expected: type[BaseException]) -> Generator[None]:
-        """Re-raise ``expected`` exceptions as ``SrtFailure(code)`` while the report is active."""
-        if not self.active:
-            yield
-            return
-        try:
-            yield
-        except expected as exc:
-            if isinstance(exc, SrtFailure):
-                raise
-            raise SrtFailure(code, str(exc)) from exc
-
     def accepted(self, slurm_job_id: str, job_name: str, output_dir: Path) -> None:
         """Record and emit that Slurm accepted a job for the current scope."""
         job = {"slurm_job_id": slurm_job_id, "output_dir": str(output_dir)}

@@ -43,7 +43,7 @@ from ruamel.yaml.error import YAMLError as RuamelYAMLError
 from srtctl.backends import VLLMBackend, VLLMMooncakeKVStoreConfig
 from srtctl.backends.base import WorkerMode
 from srtctl.cli.apply_report import ApplyReport
-from srtctl.contract.failures import FailureCode, InvocationError, SrtFailure
+from srtctl.contract.failures import FailureCode, InvocationError, SrtFailure, reraise_as
 from srtctl.core.config import (
     expand_engine_config_defaults,
     generate_override_configs,
@@ -1284,7 +1284,7 @@ def submit_with_orchestrator(
         resolved_runtime_config_text = runtime_config_text
         runtime_config_filename = f"config_{variant_suffix}.yaml" if variant_suffix else "config_resolved.yaml"
 
-    with _report.phase(FailureCode.RECIPE_INVALID, ValueError, TypeError):
+    with reraise_as(FailureCode.RECIPE_INVALID, ValueError, TypeError):
         script_content = generate_minimal_sbatch_script(
             config=config,
             config_path=config_path,
@@ -1308,11 +1308,11 @@ def submit_with_orchestrator(
     launcher = get_launcher()
     launcher_problems = launcher.validate(config)
     if launcher_problems:
-        with _report.phase(FailureCode.RECIPE_INVALID, ValueError):
-            raise ValueError(
-                f"{config.name} cannot run under launcher: {launcher.name}:\n"
-                + "\n".join(f"  - {problem}" for problem in launcher_problems)
-            )
+        raise SrtFailure(
+            FailureCode.RECIPE_INVALID,
+            f"{config.name} cannot run under launcher: {launcher.name}:\n"
+            + "\n".join(f"  - {problem}" for problem in launcher_problems),
+        )
 
     if dry_run:
         console.print()
@@ -1376,14 +1376,14 @@ def submit_with_orchestrator(
         job_output_dir = output_base / job_id
         _report.accepted(job_id, job_name, job_output_dir)
 
-        with _report.phase(FailureCode.JOB_PREPARATION_FAILED, OSError):
+        with reraise_as(FailureCode.JOB_PREPARATION_FAILED, OSError):
             job_output_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy(source_config_path or config_path, job_output_dir / "config.yaml")
             if source_config_path:
                 assert resolved_runtime_config_text is not None
                 runtime_config_path = job_output_dir / runtime_config_filename
                 runtime_config_path.write_text(resolved_runtime_config_text)
-        with _report.phase(FailureCode.SBATCH_ARCHIVE_FAILED, OSError):
+        with reraise_as(FailureCode.SBATCH_ARCHIVE_FAILED, OSError):
             shutil.copy(script_path, job_output_dir / "sbatch_script.sh")
         git_sources = git_snapshot_sources_from_extra_mounts(config)
         if git_sources:
@@ -1434,13 +1434,13 @@ def submit_with_orchestrator(
             metadata["setup_script"] = config.setup_script
 
         with (
-            _report.phase(FailureCode.METADATA_WRITE_FAILED, OSError),
+            reraise_as(FailureCode.METADATA_WRITE_FAILED, OSError),
             open(job_output_dir / f"{job_id}.json", "w") as f,
         ):
             json.dump(metadata, f, indent=2)
 
         log_dir = f"{job_output_dir}/logs"
-        with _report.phase(FailureCode.JOB_PREPARATION_FAILED, OSError):
+        with reraise_as(FailureCode.JOB_PREPARATION_FAILED, OSError):
             os.makedirs(log_dir, exist_ok=True)
 
         _record_submission(
@@ -1531,7 +1531,7 @@ def submit_single(
         job_id string on success, None for dry_run.
     """
     if config is None and config_path:
-        with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+        with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
             config = load_config(config_path)
 
     if config is None:
@@ -1595,7 +1595,7 @@ def submit_sweep(
     """
     from srtctl.core.sweep import generate_sweep_configs
 
-    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+    with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
         with open(config_path) as f:
             sweep_config = yaml.safe_load(f)
         configs = generate_sweep_configs(sweep_config)
@@ -1663,7 +1663,7 @@ def submit_sweep(
                     yaml.dump(config_dict, f)
 
                 with _report.item(parameters=params):
-                    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+                    with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
                         config = load_config(Path(temp_config_path))
                     submit_single(
                         config_path=Path(temp_config_path),
@@ -1889,12 +1889,12 @@ def materialize_config_path(config_path: Path, overrides: Sequence[Any] = (), *,
     if overrides or pin_sources:
         from srtctl.core.yaml_utils import dump_yaml_with_comments, load_yaml_text_with_comments
 
-        with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+        with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
             document = load_yaml_text_with_comments(payload)
         if overrides:
             from srtctl.core.overrides import apply_overrides_to_recipe
 
-            with _report.phase(FailureCode.INVOCATION_INVALID, ValueError, TypeError):
+            with reraise_as(FailureCode.INVOCATION_INVALID, ValueError, TypeError):
                 applied = apply_overrides_to_recipe(document, overrides)
             for entry in applied:
                 logger.info("Applied override: %s", entry)
@@ -1956,7 +1956,7 @@ def submit_override(
             submit_sweep).
         serve_only: Keep the inference endpoint running without launching a benchmark.
     """
-    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+    with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
         with open(config_path) as f:
             raw_config = yaml.safe_load(f)
         override_configs = generate_override_configs(raw_config, selector=selector)
@@ -1981,7 +1981,7 @@ def submit_override(
     from srtctl.core.config import resolve_override_yaml
     from srtctl.core.yaml_utils import dump_yaml_with_comments
 
-    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+    with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
         resolved_variants = resolve_override_yaml(config_path, selector=selector)
     if serve_only and len(resolved_variants) != 1:
         raise InvocationError("--serve-only requires an override selector that resolves to exactly one job")
@@ -1999,7 +1999,7 @@ def submit_override(
 
             logger.info(f"Override variant: {variant_label} -> {job_name}")
 
-            with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+            with reraise_as(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
                 resolved_config = resolve_config_with_defaults(
                     yaml.safe_load(runtime_config_text), load_cluster_config()
                 )

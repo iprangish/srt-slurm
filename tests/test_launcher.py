@@ -342,7 +342,7 @@ class TestLocalValidation:
         data = {**SINGLE_NODE_DISAGG, "roles": {"agg": {"nodes": 2, "workers": 1}}}
         path = tmp_path / "recipe.yaml"
         path.write_text(yaml.safe_dump(data))
-        with pytest.raises(ValueError, match="cannot run under launcher: docker"):
+        with pytest.raises(SrtFailure, match="cannot run under launcher: docker"):
             submit_with_orchestrator(config_path=path, config=SrtConfig.from_yaml(path), dry_run=True)
 
 
