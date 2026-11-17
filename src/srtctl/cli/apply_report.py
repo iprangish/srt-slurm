@@ -108,7 +108,7 @@ class ApplyReport:
 
     @property
     def exit_code(self) -> int:
-        """Process exit code: 3 partial, 2 invalid invocation, 1 failure, 0 success."""
+        """Process exit code: 3 failed after a job was accepted, 2 invalid invocation, 1 failure, 0 success."""
         if self._failures and self._accepted:
             return 3
         if any(failure.code is FailureCode.INVOCATION_INVALID for failure in self._failures):
