@@ -289,7 +289,7 @@ def test_invocation_errors_exit_2(monkeypatch, tmp_path, capsys, args, message, 
     code = _apply(monkeypatch, tmp_path, json_mode=json_mode, args=args)
     captured = capsys.readouterr()
     assert code == 2
-    assert ("usage:" in captured.err) is (message == "unrecognized arguments")
+    assert "usage:" in captured.err
     if not json_mode:
         assert "{" not in captured.out
         return
@@ -406,3 +406,13 @@ def test_non_apply_bad_flag_emits_no_record(monkeypatch, capsys):
         submit_cli.main()
     assert excinfo.value.code == 2
     assert "{" not in capsys.readouterr().out
+
+
+def test_dry_run_bad_set_still_exits_2_with_usage(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["srtctl", "dry-run", "-f", "x.yaml", "--set", "novalue"])
+    with pytest.raises(SystemExit) as excinfo:
+        submit_cli.main()
+    captured = capsys.readouterr()
+    assert excinfo.value.code == 2
+    assert "usage:" in captured.err
+    assert "{" not in captured.out

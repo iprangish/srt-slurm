@@ -2604,16 +2604,16 @@ def main():
 
 
 @contextlib.contextmanager
-def _report_usage_errors():
-    """Echo argparse's stderr; for `apply --json`, also emit its usage error as an invocation_invalid record."""
+def _report_usage_errors(report: ApplyReport):
+    """Echo argparse's stderr and, when `report` is active, record its usage error as invocation_invalid."""
     captured = io.StringIO()
     try:
         with contextlib.redirect_stderr(captured):
             yield
     except SystemExit as exc:
-        if exc.code == 2 and sys.argv[1:2] == ["apply"] and "--json" in sys.argv:
+        if exc.code == 2 and report.active:
             message = captured.getvalue().strip().split(": error: ", 1)[-1]
-            ApplyReport(active=True, json_out=sys.stdout).fail(InvocationError(message))
+            report.fail(InvocationError(message))
         raise
     finally:
         sys.stderr.write(captured.getvalue())
@@ -2629,7 +2629,9 @@ def _run():
     setup_logging()
 
     parser = build_parser()
-    with _report_usage_errors():
+    with _report_usage_errors(
+        ApplyReport(active=sys.argv[1:2] == ["apply"], json_out=sys.stdout if "--json" in sys.argv else None)
+    ):
         args = parser.parse_args()
 
     if args.command in ("dsight", "dashboard"):
@@ -2663,7 +2665,19 @@ def _run():
         failures_file=getattr(args, "failures_file", None),
     )
 
+    from srtctl.core.overrides import parse_overrides
+
+    with _report_usage_errors(_report):
+        if serve_only and mock_mode:
+            parser.error("--serve-only cannot be combined with --mock")
+        if serve_only and getattr(args, "sweep", False):
+            parser.error("--serve-only does not support sweeps")
+        try:
+            overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
+        except ValueError as exc:
+            parser.error(str(exc))
     global _active_overrides
+    _active_overrides = [override.render() for override in overrides]
 
     _mock_patch_teardowns: list = []
     if mock_mode:
@@ -2842,17 +2856,6 @@ def _run():
     tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()] or None
 
     try:
-        if serve_only and mock_mode:
-            raise InvocationError("--serve-only cannot be combined with --mock")
-        if serve_only and getattr(args, "sweep", False):
-            raise InvocationError("--serve-only does not support sweeps")
-        from srtctl.core.overrides import parse_overrides
-
-        try:
-            overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
-        except ValueError as exc:
-            raise InvocationError(str(exc)) from exc
-        _active_overrides = [override.render() for override in overrides]
         # Supports path:selector format for overrides
         config_path, selector = parse_config_arg(args.config)
         with (
