@@ -609,6 +609,8 @@ Values that were not observed are omitted, never `null`.
 | `metadata_write_failed` | The job was accepted but writing its metadata file failed. |
 | `unknown` | Any failure not classified above. |
 
+For failures inside the running job, see [Failure Records](failure-records.md).
+
 ### Exit codes
 
 | Exit code | Meaning |

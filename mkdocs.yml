@@ -94,6 +94,7 @@ nav:
           - Miles RL Post-Training: miles.md
   - Run and Operate:
       - Monitoring: monitoring.md
+      - Failure Records: failure-records.md
       - SLURM FAQ: slurm-faq.md
       - Status API: status-api-spec.md
   - Analyze:
