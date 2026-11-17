@@ -345,9 +345,9 @@ def mock_infrastructure(*, options: MockOptions, output_dir: Path):
         stop_events: list[threading.Event] = []
         original_signal_handlers = do_sweep.setup_signal_handlers
 
-        def _recording_signal_handlers(stop_event, registry):
+        def _recording_signal_handlers(stop_event, registry, **kwargs):
             stop_events.append(stop_event)
-            original_signal_handlers(stop_event, registry)
+            original_signal_handlers(stop_event, registry, **kwargs)
 
         class _EndHoldClock:
             monotonic = staticmethod(time.monotonic)

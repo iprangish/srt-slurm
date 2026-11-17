@@ -383,6 +383,7 @@ Reporting configuration for status updates, AI analysis, and log exports.
 | `status` | [ReportingStatusConfig](#reportingstatusconfig) \| None | `None` | Status collector endpoints that receive job lifecycle events. Unset sends nothing. |
 | `ai_analysis` | [AIAnalysisConfig](#aianalysisconfig) \| None | `None` | Failure analysis run after a failed job. Unset disables it. |
 | `s3` | [S3Config](#s3config) \| None | `None` | Upload of the log directory to S3-compatible storage after the run. Unset disables it. |
+| `failures` | [ReportingFailuresConfig](#reportingfailuresconfig) \| None | `None` | Structured failure records written by the in-job coordinator. Unset uses the defaults. |
 
 ### RestartPolicy
 
@@ -606,6 +607,15 @@ S3 upload configuration for log artifacts.
 | `secret_access_key` | str \| None | `None` | AWS secret access key (falls back to AWS_SECRET_ACCESS_KEY env var) |
 | `exclude` | list[str] \| None | `None` | Patterns `aws s3 sync` skips, relative to the log directory (`*` matches across directories). Omit for the defaults: aiperf's per-interval metrics scrapes and `inputs.json` under `artifacts/*/` and `sa-bench_*/*/` (tachometer already stores that series as parquet). Set to `[]` to ship the whole directory. |
 | `archive` | list[str] \| None | `None` | Patterns (Python glob, `**` allowed) packed into one `bundle.tar.zst` uploaded next to the loose files and left out of the plain sync. Omit for the default, aiperf's per-request `profile_export.jsonl`; set to `[]` for no archive. |
+
+### ReportingFailuresConfig
+
+Where the coordinator writes structured failure records.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `file` | bool | `True` | Append failure records to `<job output dir>/logs/failures.jsonl` (created on the first failure). |
+| `stdout` | bool | `False` | Also print each record to the sweep log as a line starting with `SRT_FAILURE `. |
 
 ### GpuLabelsConfig
 

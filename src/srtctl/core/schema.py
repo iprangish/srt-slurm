@@ -147,6 +147,18 @@ class ReportingStatusConfig:
 
 
 @dataclass(frozen=True)
+class ReportingFailuresConfig:
+    """Where the coordinator writes structured failure records."""
+
+    # Append failure records to `<job output dir>/logs/failures.jsonl` (created on the first failure).
+    file: bool = True
+    # Also print each record to the sweep log as a line starting with `SRT_FAILURE `.
+    stdout: bool = False
+
+    Schema: ClassVar[type[Schema]] = Schema
+
+
+@dataclass(frozen=True)
 class ReportingConfig:
     """Reporting configuration for status updates, AI analysis, and log exports."""
 
@@ -156,6 +168,8 @@ class ReportingConfig:
     ai_analysis: "AIAnalysisConfig | None" = None
     # Upload of the log directory to S3-compatible storage after the run. Unset disables it.
     s3: "S3Config | None" = None
+    # Structured failure records written by the in-job coordinator. Unset uses the defaults.
+    failures: ReportingFailuresConfig | None = None
 
     Schema: ClassVar[type[Schema]] = Schema
 

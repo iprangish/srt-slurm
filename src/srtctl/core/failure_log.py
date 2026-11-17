@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Coordinator-side failure records: ``logs/failures.jsonl``, the sweep-log human line and the optional stdout copy."""
+
+import json
+import logging
+import os
+from pathlib import Path
+
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure
+from srtctl.core.launcher import get_launcher
+from srtctl.core.processes import ProcessRegistry
+
+logger = logging.getLogger(__name__)
+
+FAILURES_FILE = "failures.jsonl"
+
+
+class FailureLog:
+    """Writes failure records for one job attempt."""
+
+    def __init__(
+        self, log_dir: Path, *, slurm_job_id: str, restart_count: int, file: bool = True, stdout: bool = False
+    ) -> None:
+        self._path = log_dir / FAILURES_FILE
+        self._identity = {"slurm_job_id": slurm_job_id, "restart_count": restart_count}
+        self._file = file
+        self._stdout = stdout
+        self._written_processes: set[str] = set()
+        self._count = 0
+        self.registry: ProcessRegistry | None = None
+
+    @classmethod
+    def disabled(cls) -> "FailureLog":
+        """A log that writes nothing."""
+        return cls(Path(), slurm_job_id="", restart_count=0, file=False)
+
+    @classmethod
+    def from_env(cls, config_path: Path) -> "FailureLog | None":
+        """The log for the running job, or None outside a job."""
+        job_id = get_launcher().job_id()
+        if job_id is None:
+            return None
+        output_dir = os.environ.get("SRTCTL_OUTPUT_DIR")
+        log_dir = (Path(output_dir) if output_dir else config_path.parent) / "logs"
+        return cls(log_dir, slurm_job_id=job_id, restart_count=int(os.environ.get("SLURM_RESTART_COUNT", "0")))
+
+    @property
+    def written(self) -> bool:
+        """Whether any record was written."""
+        return self._count > 0
+
+    def rotate(self) -> None:
+        """Move a previous attempt's file to the next free ``failures.<N>.jsonl``."""
+        if not self._path.exists():
+            return
+        n = 1
+        while (rotated := self._path.with_name(f"failures.{n}.jsonl")).exists():
+            n += 1
+        self._path.rename(rotated)
+
+    def write(self, failure: SrtFailure) -> None:
+        """Log the human line and append the record."""
+        failure.identity = dict(self._identity)
+        logger.error(failure.human_line())
+        self._count += 1
+        line = json.dumps(failure.record())
+        if self._file:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a") as f:
+                f.write(line + "\n")
+        if self._stdout:
+            print(f"SRT_FAILURE {line}", flush=True)
+
+    def flush_process_failures(self) -> bool:
+        """Write a record per newly failed process; return whether any process failed."""
+        failures = self.registry.failures() if self.registry is not None else []
+        for name, exit_code, detail in failures:
+            if name not in self._written_processes:
+                self._written_processes.add(name)
+                cause = Cause(producer=name, return_code=exit_code, message=detail or None)
+                self.write(SrtFailure(FailureCode.WORKER_FAILED, f"Process {name} failed", cause=cause))
+        return bool(failures)
+
+    def write_unless_process_failed(self, failure: SrtFailure) -> None:
+        """Write ``failure`` only when no process failure explains it."""
+        if not self.flush_process_failures():
+            self.write(failure)

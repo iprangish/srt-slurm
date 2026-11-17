@@ -47,3 +47,9 @@ def test_as_failure_wraps_unknown_and_passes_failures_through():
 def test_version_info_reports_record_schema_version():
     assert version_info().record_schema_version == 1
     assert "records v1" in str(version_info())
+
+
+def test_human_line_without_output_dir_has_no_job_suffix():
+    failure = SrtFailure(FailureCode.BENCHMARK_FAILED, "boom")
+    failure.identity = {"slurm_job_id": "42", "restart_count": 0}
+    assert failure.human_line() == "Error [benchmark_failed]: boom"

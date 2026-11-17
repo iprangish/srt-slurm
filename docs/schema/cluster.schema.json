@@ -613,9 +613,38 @@
           ],
           "description": "Upload of the log directory to S3-compatible storage after the run. Unset disables it.",
           "default": null
+        },
+        "failures": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReportingFailuresConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Structured failure records written by the in-job coordinator. Unset uses the defaults.",
+          "default": null
         }
       },
       "description": "Reporting configuration for status updates, AI analysis, and log exports."
+    },
+    "ReportingFailuresConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "file": {
+          "type": "boolean",
+          "description": "Append failure records to `<job output dir>/logs/failures.jsonl` (created on the first failure).",
+          "default": true
+        },
+        "stdout": {
+          "type": "boolean",
+          "description": "Also print each record to the sweep log as a line starting with `SRT_FAILURE `.",
+          "default": false
+        }
+      },
+      "description": "Where the coordinator writes structured failure records."
     },
     "ReportingStatusConfig": {
       "type": "object",

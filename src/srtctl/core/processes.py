@@ -10,6 +10,7 @@ This module provides lifecycle management for srun processes, including:
 - Graceful cleanup on exit or failure
 """
 
+import contextlib
 import logging
 import os
 import re
@@ -500,19 +501,32 @@ class ProcessRegistry:
                 logger.error("Node: %s", proc.node or "unknown")
                 logger.error("Log file: %s", proc.log_file or "none")
 
-                # Tail the log file if available
                 if proc.log_file and proc.log_file.exists():
                     try:
-                        # Invalid UTF-8 must not hide worker failure diagnostics.
-                        lines = proc.log_file.read_text(errors="replace").splitlines()
+                        lines = _log_tail(proc.log_file, tail_lines)
                         if lines:
                             logger.error("\nLast %d lines of log:", tail_lines)
-                            for line in lines[-tail_lines:]:
+                            for line in lines:
                                 logger.error("  %s", line)
                     except Exception as e:  # noqa: BLE001
                         logger.error("Could not read log file: %s", e)
 
         logger.error("=" * 60)
+
+    def failures(self, tail_lines: int = 50) -> list[tuple[str, int | None, str]]:
+        """Recorded failed processes in detection order as ``(name, exit_code, detail)``."""
+        with self._lock:
+            details = []
+            for name in self._failed_processes:
+                proc = self._processes.get(name)
+                if not proc:
+                    continue
+                detail = self._failure_reasons.get(name, "")
+                if not detail and proc.log_file and proc.log_file.exists():
+                    with contextlib.suppress(OSError):
+                        detail = "\n".join(_log_tail(proc.log_file, tail_lines))
+                details.append((name, proc.exit_code, detail))
+            return details
 
     def get_process(self, name: str) -> ManagedProcess | None:
         """Get a process by name."""
@@ -536,9 +550,15 @@ class ProcessRegistry:
             return len(self._processes)
 
 
+def _log_tail(log_file: Path, tail_lines: int) -> list[str]:
+    # Invalid UTF-8 must not hide worker failure diagnostics.
+    return log_file.read_text(errors="replace").splitlines()[-tail_lines:]
+
+
 def setup_signal_handlers(
     stop_event: threading.Event,
     registry: ProcessRegistry,
+    on_signal: Callable[[str], None] | None = None,
 ) -> None:
     """Setup signal handlers for graceful shutdown.
 
@@ -548,11 +568,14 @@ def setup_signal_handlers(
     Args:
         stop_event: Event to signal shutdown
         registry: ProcessRegistry to cleanup on signal
+        on_signal: Called with the signal name on the first signal only, before cleanup
     """
 
     def signal_handler(signum, frame):
         sig_name = signal.Signals(signum).name
         logger.warning("Received signal %s, initiating cleanup...", sig_name)
+        if on_signal is not None and registry.received_signal is None:
+            on_signal(sig_name)
         registry.received_signal = sig_name
         stop_event.set()
         registry.cleanup()
