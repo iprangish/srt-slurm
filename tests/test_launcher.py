@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from srtctl.contract.failures import FailureCode
+from srtctl.contract.failures import FailureCode, SrtFailure
 from srtctl.core import launcher as launcher_mod
 from srtctl.core.docker import DockerLauncher
 from srtctl.core.launcher import LaunchSpec, SlurmLauncher, get_launcher
@@ -394,7 +394,7 @@ def _sbatch_error(stderr: str, returncode: int = 1) -> subprocess.CalledProcessE
 )
 def test_sbatch_refusal_is_rejected_with_subcode(message, subcode):
     stderr = f"{REFUSAL_CONTEXT}sbatch: error: Batch job submission failed: {message}\n"
-    with patch("subprocess.run", side_effect=_sbatch_error(stderr)), pytest.raises(Exception) as excinfo:
+    with patch("subprocess.run", side_effect=_sbatch_error(stderr)), pytest.raises(SrtFailure) as excinfo:
         SlurmLauncher().submit(Path("job.sh"))
     failure = excinfo.value
     assert failure.code is FailureCode.SBATCH_REJECTED
@@ -416,7 +416,7 @@ def test_sbatch_refusal_is_rejected_with_subcode(message, subcode):
     ],
 )
 def test_unlisted_or_communication_error_is_submission_failed(stderr):
-    with patch("subprocess.run", side_effect=_sbatch_error(stderr)), pytest.raises(Exception) as excinfo:
+    with patch("subprocess.run", side_effect=_sbatch_error(stderr)), pytest.raises(SrtFailure) as excinfo:
         SlurmLauncher().submit(Path("job.sh"))
     assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
     assert excinfo.value.subcode is None
@@ -424,7 +424,7 @@ def test_unlisted_or_communication_error_is_submission_failed(stderr):
 
 def test_sbatch_without_job_id_is_submission_failed_with_stdout():
     result = MagicMock(stdout="weird", stderr="")
-    with patch("subprocess.run", return_value=result), pytest.raises(Exception) as excinfo:
+    with patch("subprocess.run", return_value=result), pytest.raises(SrtFailure) as excinfo:
         SlurmLauncher().submit(Path("job.sh"))
     assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
     assert excinfo.value.cause.message == "weird"
@@ -432,6 +432,13 @@ def test_sbatch_without_job_id_is_submission_failed_with_stdout():
 
 
 def test_sbatch_missing_binary_is_submission_failed():
-    with patch("subprocess.run", side_effect=FileNotFoundError("sbatch")), pytest.raises(Exception) as excinfo:
+    with patch("subprocess.run", side_effect=FileNotFoundError("sbatch")), pytest.raises(SrtFailure) as excinfo:
         SlurmLauncher().submit(Path("job.sh"))
     assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
+    assert excinfo.value.cause.message == "sbatch"
+
+
+def test_silent_sbatch_failure_omits_cause_message():
+    failure = launcher_mod.sbatch_failure(1, "", "")
+    assert failure.message == "sbatch did not report a job id"
+    assert "message" not in failure.record()["cause"]

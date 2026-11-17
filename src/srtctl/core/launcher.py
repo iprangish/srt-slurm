@@ -60,8 +60,9 @@ SBATCH_REFUSALS: dict[str, str] = {
 def sbatch_failure(returncode: int | None, stdout: str, stderr: str) -> SrtFailure:
     """Classify a failed sbatch call: a listed controller refusal is ``sbatch_rejected``, anything else is not."""
     stderr = stderr.strip()
-    message = stderr or stdout.strip() or "sbatch did not report a job id"
-    cause = Cause(producer="sbatch", return_code=returncode, message=message)
+    observed = stderr or stdout.strip()
+    message = observed or "sbatch did not report a job id"
+    cause = Cause(producer="sbatch", return_code=returncode, message=observed or None)
     refused = {
         line.removeprefix(_SBATCH_REFUSAL_PREFIX)
         for line in stderr.splitlines()
@@ -430,7 +431,7 @@ class SlurmLauncher(Launcher):
         except subprocess.CalledProcessError as exc:
             raise sbatch_failure(exc.returncode, exc.stdout or "", exc.stderr or "") from exc
         except OSError as exc:
-            raise SrtFailure(FailureCode.SUBMISSION_FAILED, f"could not run sbatch: {exc}") from exc
+            raise sbatch_failure(None, "", str(exc)) from exc
         match = re.search(r"Submitted batch job (\d+)", result.stdout)
         if match is None:
             raise sbatch_failure(0, result.stdout, result.stderr)

@@ -1357,12 +1357,7 @@ def submit_with_orchestrator(
         output_base = output_dir
     else:
         custom_output_dir = get_srtslurm_setting("output_dir")
-        if custom_output_dir:
-            output_base = Path(os.path.expandvars(custom_output_dir))
-        else:
-            srtctl_root = get_srtslurm_setting("srtctl_root")
-            srtctl_source = Path(srtctl_root) if srtctl_root else Path(__file__).parent.parent.parent.parent
-            output_base = srtctl_source / "outputs"
+        output_base = Path(os.path.expandvars(custom_output_dir)) if custom_output_dir else srtctl_source / "outputs"
     job_name = get_job_name(config)
 
     keep_script = False
@@ -1782,6 +1777,8 @@ def submit_directory(
                 )
             success_count += 1
         except Exception as e:
+            if isinstance(e, SrtFailure) and e.code is FailureCode.SETUP_INCOMPLETE:
+                raise
             console.print(f"[bold red]  ❌ Error:[/] {e}")
             logger.debug("Full traceback:", exc_info=True)
             error_count += 1
@@ -2567,7 +2564,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
-    """Run the CLI, leaving the module's console and report as they were found on every exit path."""
+    """Run the CLI; on every exit path restore the console and reset the report to an inactive one."""
     global console, _report
     original_console = console
     try:
@@ -2810,7 +2807,7 @@ def _run():
 
     try:
         with (
-            _report.item(recipe_path=args.config),
+            contextlib.nullcontext() if config_path.is_dir() else _report.item(recipe_path=args.config),
             materialize_config_path(
                 config_path, overrides, pin_sources=args.command == "apply"
             ) as effective_config_path,
@@ -2958,7 +2955,6 @@ def _run():
         logger.debug("Full traceback:", exc_info=True)
         if _report.active:
             console.print(_report.fail(e).human_line(), markup=False, highlight=False)
-            restore_console()
             sys.exit(_report.exit_code)
         restore_console()
         console.print(f"[bold red]Error:[/] {e}")

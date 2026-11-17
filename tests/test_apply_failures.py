@@ -7,7 +7,9 @@ import json
 import shutil
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -15,7 +17,9 @@ import pytest
 import yaml
 
 from srtctl.cli import submit as submit_cli
+from srtctl.contract.failures import FailureCode, SrtFailure
 from srtctl.core.docker import DockerLauncher
+from srtctl.core.validation import PreflightIssue
 
 MINIMAL_CONFIG = {
     "schema": 2,
@@ -38,7 +42,7 @@ def _apply(
     config: dict | None = None,
     json_mode: bool = True,
     run: Any = None,
-    preflight: Any = None,
+    real_preflight: bool = False,
     setup: Any = None,
     extra_patches: tuple = (),
 ) -> int:
@@ -52,18 +56,17 @@ def _apply(
         patch("subprocess.run", **({"side_effect": run} if run else {"return_value": _sbatch()})),
         patch("srtctl.cli.submit.get_srtslurm_setting", return_value=None),
         patch("srtctl.cli.submit.create_job_record"),
-        patch("srtctl.cli.submit._assert_preflight_passed", **(preflight or {})),
         patch("srtctl.cli.submit.validate_setup", **(setup or {})),
+        ExitStack() as stack,
     ):
-        from contextlib import ExitStack
-
-        with ExitStack() as stack:
-            for extra in extra_patches:
-                stack.enter_context(extra)
-            try:
-                submit_cli.main()
-            except SystemExit as exc:
-                code = exc.code if isinstance(exc.code, int) else 1
+        if not real_preflight:
+            stack.enter_context(patch("srtctl.cli.submit._assert_preflight_passed"))
+        for extra in extra_patches:
+            stack.enter_context(extra)
+        try:
+            submit_cli.main()
+        except SystemExit as exc:
+            code = exc.code if isinstance(exc.code, int) else 1
     return code
 
 
@@ -149,22 +152,27 @@ def test_accepted_then_failure_without_json_names_the_job(monkeypatch, tmp_path,
 
 
 def test_preflight_failure_keeps_every_issue(monkeypatch, tmp_path, capsys):
-    from srtctl.contract.failures import FailureCode, SrtFailure
-
     issues = [
-        {"code": "model_missing", "field": "model.path", "message": "no model"},
-        {"code": "container_missing", "field": "model.container", "message": "no container"},
+        PreflightIssue("model-missing", "model.path", "no model"),
+        PreflightIssue("container-missing", "model.container", "no container"),
     ]
-    failure = SrtFailure(FailureCode.PREFLIGHT_FAILED, "Preflight failed", issues=issues)
-    exit_code = _apply(monkeypatch, tmp_path, preflight={"side_effect": failure})
+    failed = SimpleNamespace(ok=False, errors=issues)
+    exit_code = _apply(
+        monkeypatch,
+        tmp_path,
+        real_preflight=True,
+        extra_patches=(
+            patch("srtctl.cli.submit.preflight_config_variants", return_value=[failed]),
+            patch("srtctl.cli.submit.load_cluster_config", return_value={}),
+        ),
+    )
     (record,) = _records(capsys)
     assert record["code"] == "preflight_failed"
-    assert [issue["code"] for issue in record["issues"]] == ["model_missing", "container_missing"]
+    assert [issue["code"] for issue in record["issues"]] == ["model-missing", "container-missing"]
     assert exit_code == 1
 
 
 def test_missing_setup_binaries_is_setup_incomplete(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(submit_cli, "get_srtslurm_setting", lambda key, default=None: default)
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(yaml.dump(MINIMAL_CONFIG))
     monkeypatch.setattr(sys, "argv", ["srtctl", "apply", "-f", str(cfg), "-o", str(tmp_path), "--json"])
@@ -226,3 +234,23 @@ def test_docker_foreground_run_failure_keeps_job_exit_code(monkeypatch, tmp_path
     records = _records(capsys)
     assert [r["status"] for r in records] == ["accepted", "submitted"]
     assert exit_code == 7
+
+
+def test_directory_aborts_on_setup_incomplete(monkeypatch, tmp_path, capsys):
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    for name in ("a.yaml", "b.yaml"):
+        (recipes / name).write_text(yaml.dump(MINIMAL_CONFIG))
+    monkeypatch.setattr(sys, "argv", ["srtctl", "apply", "-f", str(recipes), "-o", str(tmp_path), "--json"])
+    validate = MagicMock(side_effect=SrtFailure(FailureCode.SETUP_INCOMPLETE, "Required binaries not found"))
+    with (
+        patch("srtctl.cli.submit.get_srtslurm_setting", return_value=None),
+        patch("srtctl.cli.submit._assert_preflight_passed"),
+        patch("srtctl.cli.submit.validate_setup", validate),
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        submit_cli.main()
+    (record,) = _records(capsys)
+    assert record["code"] == "setup_incomplete"
+    assert excinfo.value.code == 1
+    assert validate.call_count == 1
