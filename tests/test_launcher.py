@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
+from srtctl.contract.failures import FailureCode
 from srtctl.core import launcher as launcher_mod
 from srtctl.core.docker import DockerLauncher
 from srtctl.core.launcher import LaunchSpec, SlurmLauncher, get_launcher
@@ -368,3 +369,69 @@ def test_subprocess_is_not_left_running(docker, cluster, tmp_path):
     proc = docker.launch(LaunchSpec(command=["true"], step_name="quick", output=str(tmp_path / "q.out")))
     assert proc.wait(timeout=10) == 0
     assert isinstance(proc, subprocess.Popen)
+
+
+REFUSAL_CONTEXT = "sbatch: error: CPU count per node can not be satisfied\n"
+
+
+def _sbatch_error(stderr: str, returncode: int = 1) -> subprocess.CalledProcessError:
+    return subprocess.CalledProcessError(returncode, ["sbatch"], output="", stderr=stderr)
+
+
+@pytest.mark.parametrize(
+    ("message", "subcode"),
+    [
+        (
+            "Requested time limit is invalid (missing or exceeds some limit)",
+            "ESLURM_INVALID_TIME_LIMIT",
+        ),
+        (
+            "Invalid account or account/partition combination specified",
+            "ESLURM_INVALID_ACCOUNT",
+        ),
+        ("Requested node configuration is not available", "ESLURM_REQUESTED_NODE_CONFIG_UNAVAILABLE"),
+    ],
+)
+def test_sbatch_refusal_is_rejected_with_subcode(message, subcode):
+    stderr = f"{REFUSAL_CONTEXT}sbatch: error: Batch job submission failed: {message}\n"
+    with patch("subprocess.run", side_effect=_sbatch_error(stderr)), pytest.raises(Exception) as excinfo:
+        SlurmLauncher().submit(Path("job.sh"))
+    failure = excinfo.value
+    assert failure.code is FailureCode.SBATCH_REJECTED
+    assert failure.subcode == subcode
+    assert failure.cause.message == stderr.strip()
+    assert failure.cause.return_code == 1
+    assert failure.cause.producer == "sbatch"
+    assert failure.cause.code is None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation",
+        "sbatch: error: Batch job submission failed: Unable to contact slurm controller (connect failure)",
+        "sbatch: error: Batch job submission failed: Something nobody listed",
+        "sbatch: error: Batch job submission failed: Communication connection failure",
+        "sbatch: error: Batch job submission failed: Zero Bytes were transmitted or received",
+    ],
+)
+def test_unlisted_or_communication_error_is_submission_failed(stderr):
+    with patch("subprocess.run", side_effect=_sbatch_error(stderr)), pytest.raises(Exception) as excinfo:
+        SlurmLauncher().submit(Path("job.sh"))
+    assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
+    assert excinfo.value.subcode is None
+
+
+def test_sbatch_without_job_id_is_submission_failed_with_stdout():
+    result = MagicMock(stdout="weird", stderr="")
+    with patch("subprocess.run", return_value=result), pytest.raises(Exception) as excinfo:
+        SlurmLauncher().submit(Path("job.sh"))
+    assert excinfo.value.code is FailureCode.SUBMISSION_FAILED
+    assert excinfo.value.cause.message == "weird"
+    assert excinfo.value.cause.return_code == 0
+
+
+def test_sbatch_missing_binary_is_submission_failed():
+    with patch("subprocess.run", side_effect=FileNotFoundError("sbatch")), pytest.raises(Exception) as excinfo:
+        SlurmLauncher().submit(Path("job.sh"))
+    assert excinfo.value.code is FailureCode.SUBMISSION_FAILED

@@ -39,6 +39,8 @@ from rich.text import Text
 
 from srtctl.backends import VLLMBackend, VLLMMooncakeKVStoreConfig
 from srtctl.backends.base import WorkerMode
+from srtctl.cli.apply_report import ApplyReport
+from srtctl.contract.failures import FailureCode, SrtFailure
 from srtctl.core.config import (
     expand_engine_config_defaults,
     generate_override_configs,
@@ -87,9 +89,8 @@ from srtctl.status_server.server import serve as serve_status_server
 console = Console()
 logger = logging.getLogger(__name__)
 
-# Populated by submit_with_orchestrator on successful submission. Consumed by
-# main() when --json is set so callers get one JSON line per submitted job.
-_submissions: list[dict] = []
+# Rebound by main() for `apply`; collects accepted submissions and failures.
+_report: ApplyReport = ApplyReport()
 
 # Rendered --set/--unset overrides for the current invocation; echoed into every
 # submission record so a caller can see exactly what was applied.
@@ -104,7 +105,7 @@ def _record_submission(data: dict) -> None:
         data["applied_overrides"] = list(_active_overrides)
     if _pinned_sources:
         data["pinned_sources"] = list(_pinned_sources)
-    _submissions.append(data)
+    _report.submitted(data)
 
 
 def _format_preflight_error(label: str, results: list[Any]) -> str:
@@ -122,7 +123,15 @@ def _assert_preflight_passed(raw_config: dict[str, Any], *, label: str) -> None:
     )
     failed = [result for result in results if not result.ok]
     if failed:
-        raise ValueError(_format_preflight_error(label, failed))
+        raise SrtFailure(
+            FailureCode.PREFLIGHT_FAILED,
+            _format_preflight_error(label, failed),
+            issues=[
+                {"code": issue.code, "field": issue.field, "message": issue.message}
+                for result in failed
+                for issue in result.errors
+            ],
+        )
 
 
 def _install_mock_submit_patches() -> list:
@@ -906,8 +915,8 @@ def _cpu_power_exporter_problem(srtctl_source: Path) -> str | None:
 def validate_setup(srtctl_source: Path, config: SrtConfig | None = None) -> None:
     """Validate that make setup has been run and required binaries exist.
 
-    Checks for NATS, etcd, Tachometer, and compute-arch uv binaries. Raises SystemExit
-    with a clear error message if anything is missing.
+    Checks for NATS, etcd, Tachometer, and compute-arch uv binaries. Raises SrtFailure
+    if anything is missing.
 
     cpu-power-exporter is only required by recipes that configure
     telemetry.cpu_power_exporter; every other recipe submits without it.
@@ -939,7 +948,10 @@ def validate_setup(srtctl_source: Path, config: SrtConfig | None = None) -> None
         console.print(f"  cd {srtctl_source}")
         console.print("  make setup ARCH=aarch64  [dim]# for GB200/Grace compute nodes[/]")
         console.print("  make setup ARCH=x86_64   [dim]# for x86_64 compute nodes[/]\n")
-        raise SystemExit(1)
+        raise SrtFailure(
+            FailureCode.SETUP_INCOMPLETE,
+            f"Required binaries not found in {srtctl_source}: {', '.join(missing)}",
+        )
 
     # Optional: the default process exporter is host-native and skipped at launch
     # (with a warning in the sweep log) when its binary is absent. Surface that at
@@ -1291,10 +1303,11 @@ def submit_with_orchestrator(
     launcher = get_launcher()
     launcher_problems = launcher.validate(config)
     if launcher_problems:
-        raise ValueError(
-            f"{config.name} cannot run under launcher: {launcher.name}:\n"
-            + "\n".join(f"  - {problem}" for problem in launcher_problems)
-        )
+        with _report.phase(FailureCode.RECIPE_INVALID, ValueError):
+            raise ValueError(
+                f"{config.name} cannot run under launcher: {launcher.name}:\n"
+                + "\n".join(f"  - {problem}" for problem in launcher_problems)
+            )
 
     if dry_run:
         console.print()
@@ -1339,35 +1352,43 @@ def submit_with_orchestrator(
     console.print(f"[bold cyan]🚀 Submitting:[/] {config.name}")
     logger.debug("Script: %s", script_path)
 
+    # Priority: CLI -o flag > srtslurm.yaml output_dir > srtctl_root/outputs
+    if output_dir:
+        output_base = output_dir
+    else:
+        custom_output_dir = get_srtslurm_setting("output_dir")
+        if custom_output_dir:
+            output_base = Path(os.path.expandvars(custom_output_dir))
+        else:
+            srtctl_root = get_srtslurm_setting("srtctl_root")
+            srtctl_source = Path(srtctl_root) if srtctl_root else Path(__file__).parent.parent.parent.parent
+            output_base = srtctl_source / "outputs"
+    job_name = get_job_name(config)
+
     keep_script = False
     try:
-        job_id = launcher.submit(Path(script_path))
+        try:
+            job_id = launcher.submit(Path(script_path))
+        except SrtFailure as e:
+            console.print(f"[bold red]❌ sbatch failed:[/] {e.cause.message if e.cause else e.message}")
+            keep_script = True
+            raise
+        job_output_dir = output_base / job_id
+        _report.accepted(job_id, job_name, job_output_dir)
 
-        # Determine output directory
-        # Priority: CLI -o flag > srtslurm.yaml output_dir > srtctl_root/outputs
-        if output_dir:
-            job_output_dir = output_dir / job_id
-        else:
-            custom_output_dir = get_srtslurm_setting("output_dir")
-            if custom_output_dir:
-                job_output_dir = Path(os.path.expandvars(custom_output_dir)) / job_id
-            else:
-                srtctl_root = get_srtslurm_setting("srtctl_root")
-                srtctl_source = Path(srtctl_root) if srtctl_root else Path(__file__).parent.parent.parent.parent
-                job_output_dir = srtctl_source / "outputs" / job_id
-        job_output_dir.mkdir(parents=True, exist_ok=True)
-
-        shutil.copy(source_config_path or config_path, job_output_dir / "config.yaml")
-        if source_config_path:
-            assert resolved_runtime_config_text is not None
-            runtime_config_path = job_output_dir / runtime_config_filename
-            runtime_config_path.write_text(resolved_runtime_config_text)
-        shutil.copy(script_path, job_output_dir / "sbatch_script.sh")
-        git_sources = git_snapshot_sources_from_extra_mounts(config)
-        if git_sources:
-            write_git_state_snapshot(job_output_dir / GIT_STATE_FILENAME, git_sources)
-
-        job_name = get_job_name(config)
+        with _report.phase(FailureCode.JOB_PREPARATION_FAILED, OSError):
+            job_output_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(source_config_path or config_path, job_output_dir / "config.yaml")
+            if source_config_path:
+                assert resolved_runtime_config_text is not None
+                runtime_config_path = job_output_dir / runtime_config_filename
+                runtime_config_path.write_text(resolved_runtime_config_text)
+        with _report.phase(FailureCode.SBATCH_ARCHIVE_FAILED, OSError):
+            shutil.copy(script_path, job_output_dir / "sbatch_script.sh")
+        with _report.phase(FailureCode.JOB_PREPARATION_FAILED, OSError):
+            git_sources = git_snapshot_sources_from_extra_mounts(config)
+            if git_sources:
+                write_git_state_snapshot(job_output_dir / GIT_STATE_FILENAME, git_sources)
 
         # Build comprehensive job metadata
         metadata: dict[str, Any] = {
@@ -1413,8 +1434,15 @@ def submit_with_orchestrator(
         if config.setup_script:
             metadata["setup_script"] = config.setup_script
 
-        with open(job_output_dir / f"{job_id}.json", "w") as f:
+        with (
+            _report.phase(FailureCode.METADATA_WRITE_FAILED, OSError),
+            open(job_output_dir / f"{job_id}.json", "w") as f,
+        ):
             json.dump(metadata, f, indent=2)
+
+        log_dir = f"{job_output_dir}/logs"
+        with _report.phase(FailureCode.JOB_PREPARATION_FAILED, OSError):
+            os.makedirs(log_dir, exist_ok=True)
 
         _record_submission(
             {
@@ -1439,8 +1467,6 @@ def submit_with_orchestrator(
             metadata=metadata,
         )
 
-        log_dir = f"{job_output_dir}/logs"
-        os.makedirs(log_dir, exist_ok=True)
         log = f"{log_dir}/sweep_{job_id}.log"
         subprocess.run(
             ["touch", log],
@@ -1463,10 +1489,6 @@ def submit_with_orchestrator(
 
         return job_id
 
-    except subprocess.CalledProcessError as e:
-        console.print(f"[bold red]❌ sbatch failed:[/] {e.stderr}")
-        keep_script = True
-        raise
     finally:
         if not keep_script:
             with contextlib.suppress(OSError):
@@ -2545,6 +2567,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main():
+    """Run the CLI, leaving the module's console and report as they were found on every exit path."""
+    global console, _report
+    original_console = console
+    try:
+        _run()
+    finally:
+        console = original_console
+        _report = ApplyReport()
+
+
+def _run():
     # If no args at all, launch interactive mode
     if len(sys.argv) == 1:
         from srtctl.cli.interactive import run_interactive
@@ -2584,8 +2617,8 @@ def main():
         global console
         console = _original_console
 
-    if json_mode:
-        _submissions.clear()
+    global _report
+    _report = ApplyReport(active=args.command == "apply", json_out=sys.stdout if json_mode else None)
 
     from srtctl.core.overrides import parse_overrides
 
@@ -2776,9 +2809,12 @@ def main():
     tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()] or None
 
     try:
-        with materialize_config_path(
-            config_path, overrides, pin_sources=args.command == "apply"
-        ) as effective_config_path:
+        with (
+            _report.item(recipe_path=args.config),
+            materialize_config_path(
+                config_path, overrides, pin_sources=args.command == "apply"
+            ) as effective_config_path,
+        ):
             if not effective_config_path.exists():
                 console.print(f"[bold red]Config not found:[/] {config_path}")
                 sys.exit(1)
@@ -2919,14 +2955,13 @@ def main():
             with contextlib.suppress(Exception):
                 patcher.stop()
         _mock_patch_teardowns = []
-        restore_console()
-        if json_mode:
-            sys.stdout.write(json.dumps({"status": "error", "error": str(e)}) + "\n")
-            sys.stdout.flush()
-            logger.debug("Full traceback:", exc_info=True)
-            sys.exit(1)
-        console.print(f"[bold red]Error:[/] {e}")
         logger.debug("Full traceback:", exc_info=True)
+        if _report.active:
+            console.print(_report.fail(e).human_line(), markup=False, highlight=False)
+            restore_console()
+            sys.exit(_report.exit_code)
+        restore_console()
+        console.print(f"[bold red]Error:[/] {e}")
         sys.exit(1)
 
     # Mock-mode post-submit: spawn the detached orchestrator worker so the
@@ -2934,24 +2969,20 @@ def main():
     # wrote to. Tear down sbatch patches AFTER the spawn so the spawned
     # subprocess inherits a clean environment (Popen itself isn't patched).
     if mock_mode:
-        for submission in _submissions:
+        for submission in _report.submissions:
             _spawn_mock_worker(submission, tick_s=float(args.mock_tick_s))
         for patcher in _mock_patch_teardowns:
             with contextlib.suppress(Exception):
                 patcher.stop()
         _mock_patch_teardowns = []
 
-    if json_mode:
-        if not _submissions:
-            sys.stdout.write(json.dumps({"status": "no-submissions"}) + "\n")
-        else:
-            for record in _submissions:
-                sys.stdout.write(json.dumps(record) + "\n")
-        sys.stdout.flush()
+    _report.finish()
 
     # Restore the pre-main console binding so direct library callers aren't
     # affected by this invocation's json-mode rebinding.
     restore_console()
+    if _report.exit_code:
+        sys.exit(_report.exit_code)
 
 
 if __name__ == "__main__":

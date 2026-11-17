@@ -79,9 +79,8 @@ def test_apply_mock_emits_submission_json_and_spawns_worker(monkeypatch, tmp_pat
     ):
         submit_cli.main()
 
-    stdout = capsys.readouterr().out.strip()
-    assert "\n" not in stdout
-    record = json.loads(stdout)
+    accepted, record = (json.loads(line) for line in capsys.readouterr().out.strip().splitlines())
+    assert accepted["status"] == "accepted"
     assert record["status"] == "submitted"
     slurm_job_id = record["slurm_job_id"]
     assert slurm_job_id and slurm_job_id.isdigit()

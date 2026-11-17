@@ -97,3 +97,17 @@ def as_failure(exc: BaseException) -> SrtFailure:
     if isinstance(exc, SrtFailure):
         return exc
     return SrtFailure(FailureCode.UNKNOWN, str(exc) or type(exc).__name__)
+
+
+class InvocationError(SrtFailure, ValueError):
+    """The command line is invalid."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(FailureCode.INVOCATION_INVALID, message)
+
+
+class UnsupportedRecipeSchemaError(SrtFailure, ValueError):
+    """The recipe declares a schema this srtctl does not load."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(FailureCode.RECIPE_SCHEMA_UNSUPPORTED, message)
