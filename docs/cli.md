@@ -572,7 +572,7 @@ The MCP server (`srtctl-mcp`, stdio by default, `SRTCTL_MCP_TRANSPORT=streamable
 
 `srtctl apply --json` writes newline-delimited JSON records to stdout and sends all prose to stderr. Each record has `schema_version` (`1`) and a `status`:
 
-- `accepted`: Slurm accepted a job. Printed as soon as the job ID exists, before the post-submit bookkeeping, so a later failure never hides the job.
+- `accepted`: Slurm accepted a job. Carries `slurm_job_id`, `job_name`, `output_dir` and the submission identity. Printed as soon as the job ID exists, before the post-submit bookkeeping, so a later failure never hides the job.
 - `submitted`: the submission finished. Carries `slurm_job_id`, `job_name`, `output_dir`, `applied_overrides` and `pinned_sources` when present.
 - `error`: a failure record, described below.
 - `no-submissions`: nothing was submitted and nothing failed, for example an empty directory.
@@ -620,7 +620,7 @@ For failures inside the running job, see [Failure Records](failure-records.md).
 | `2` | Invalid invocation (a command-line error, a bad `--set`, an unsupported flag combination or a missing recipe). |
 | `3` | Partial: at least one job was accepted and at least one failure was reported. |
 
-`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed. Errors raised by argument parsing itself (unknown flag, missing `-f`) happen before the path is known, so under `--json` they are reported only on stdout.
+`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed, and a file that cannot be written only prints a warning to stderr. Errors raised by argument parsing itself (unknown flag, missing `-f`) happen before the path is known, so under `--json` they are reported only on stdout.
 
 ### Reading the output as a client
 

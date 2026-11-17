@@ -10,7 +10,7 @@ When a job fails, the in-job coordinator (`do_sweep`) writes one structured reco
 | Sweep log | always | A human line `Error [code]: message`, or `Error [code / subcode]: message`, at ERROR level. |
 | Sweep log, `SRT_FAILURE ` prefix | off | The same JSON record on a line of its own, for log scrapers. |
 
-Writing never raises: if the file cannot be written, a warning is logged and the job continues.
+Writing never raises: if the file cannot be written or rotated, a warning is logged and the job continues.
 
 Each record has `schema_version`, `status` (`error`), `code`, optional `subcode`, `error`, and optional `cause` and `issues`, as described in the CLI guide. The coordinator identifies the job attempt with `slurm_job_id` and `restart_count` (`SLURM_RESTART_COUNT`) instead of `output_dir`. Values that were not observed are omitted.
 
@@ -28,7 +28,7 @@ Records are appended in the order the failures were observed, so the first recor
 | `telemetry_required_failed` | `telemetry.required` is set and clock-sync, power telemetry or its finalization fails. |
 | `worker_failed` | A managed process (worker, frontend or service) exits abnormally, one record per process (`cause.producer` is the process name, `cause.return_code` its exit code); or a DWDP worker finds no rank-0 endpoint to rendezvous with, which has no process cause. |
 | `health_check_timeout` | Server, frontend, worker or `services[]` readiness did not pass in time. For the server-health waits it is skipped when a process failure already explains it. |
-| `benchmark_failed` | The benchmark or eval-only run exited non-zero (`cause.producer` names it, with `cause.return_code`), unless a process failure explains it; or a terminal service step exits non-zero, one record per step. |
+| `benchmark_failed` | The benchmark or eval-only run exited non-zero (`cause.producer` names it, with `cause.return_code`); or a terminal service step exits non-zero, one record per step. Skipped when a process failure explains it. |
 | `terminated` | The coordinator received a shutdown signal; `subcode` is `SIGTERM` or `SIGINT`. Any process failure that preceded the signal is recorded first. |
 | `unknown` | An unclassified exception, or a non-zero exit with no earlier record. |
 
