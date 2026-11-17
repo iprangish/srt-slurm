@@ -45,11 +45,13 @@ def _apply(
     real_preflight: bool = False,
     setup: Any = None,
     extra_patches: tuple = (),
+    target: Path | str | None = None,
+    args: tuple = (),
 ) -> int:
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text(yaml.dump(config or MINIMAL_CONFIG))
     monkeypatch.delenv("RUNNER_NAME", raising=False)
-    argv = ["srtctl", "apply", "-f", str(cfg), "-o", str(tmp_path)] + (["--json"] if json_mode else [])
+    argv = ["srtctl", "apply", "-f", str(target or cfg), "-o", str(tmp_path), *args] + (["--json"] if json_mode else [])
     monkeypatch.setattr(sys, "argv", argv)
     code = 0
     with (
@@ -254,3 +256,146 @@ def test_directory_aborts_on_setup_incomplete(monkeypatch, tmp_path, capsys):
     assert record["code"] == "setup_incomplete"
     assert excinfo.value.code == 1
     assert validate.call_count == 1
+
+
+def _recipes(tmp_path: Path, **files: Any) -> Path:
+    directory = tmp_path / "recipes"
+    directory.mkdir()
+    for name, content in files.items():
+        (directory / f"{name}.yaml").write_text(content if isinstance(content, str) else yaml.dump(content))
+    return directory
+
+
+def _fail_preflight_on_call(number: int):
+    calls = iter(range(1, 100))
+
+    def check(*args, **kwargs):
+        if next(calls) == number:
+            raise SrtFailure(FailureCode.PREFLIGHT_FAILED, "model missing")
+
+    return patch("srtctl.cli.submit._assert_preflight_passed", side_effect=check)
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (("--bogus",), "unrecognized arguments"),
+        (("--set", "novalue"), "KEY=VALUE"),
+        (("--set", "a..b=1"), "empty segment"),
+    ],
+)
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_invocation_errors_exit_2(monkeypatch, tmp_path, capsys, args, message, json_mode):
+    code = _apply(monkeypatch, tmp_path, json_mode=json_mode, args=args)
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "usage:" in captured.err
+    if not json_mode:
+        assert "{" not in captured.out
+        return
+    (record,) = [json.loads(line) for line in captured.out.splitlines()]
+    assert record["code"] == "invocation_invalid"
+    assert message in record["error"]
+    assert not record["error"].startswith("srtctl apply: error:")
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_bad_selector_and_missing_recipe_exit_2(monkeypatch, tmp_path, capsys, json_mode):
+    for target in (tmp_path / "cfg.yaml:bogus", tmp_path / "missing.yaml"):
+        assert _apply(monkeypatch, tmp_path, json_mode=json_mode, target=target) == 2
+        out = capsys.readouterr().out
+        assert ("{" in out) is json_mode
+        assert "invocation_invalid" in out
+
+
+def test_empty_stdin_exit_2(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(read=lambda: ""))
+    assert _apply(monkeypatch, tmp_path, target="-") == 2
+    assert _records(capsys)[0]["code"] == "invocation_invalid"
+
+
+def test_help_is_not_an_error(monkeypatch, tmp_path, capsys):
+    assert _apply(monkeypatch, tmp_path, args=("--help",)) == 0
+    assert "{" not in capsys.readouterr().out
+
+
+def test_yaml_syntax_error_is_recipe_invalid(monkeypatch, tmp_path, capsys):
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("a: [unclosed\n")
+    assert _apply(monkeypatch, tmp_path, target=bad) == 1
+    (record,) = _records(capsys)
+    assert record["code"] == "recipe_invalid"
+    assert record["submission_index"] == 1
+    assert record["recipe_path"] == str(bad)
+
+
+def test_set_path_not_in_recipe_is_invocation_invalid(monkeypatch, tmp_path, capsys):
+    assert _apply(monkeypatch, tmp_path, args=("--set", "model.path.x=1")) == 2
+    assert _records(capsys)[0]["code"] == "invocation_invalid"
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_directory_mixed_results_exit_3(monkeypatch, tmp_path, capsys, json_mode):
+    directory = _recipes(tmp_path, a=MINIMAL_CONFIG, b="name: [broken\n")
+    assert _apply(monkeypatch, tmp_path, json_mode=json_mode, target=directory) == 3
+    out = capsys.readouterr().out
+    if not json_mode:
+        assert "Error [recipe_invalid]" in out
+        return
+    accepted, submitted, error = [json.loads(line) for line in out.splitlines()]
+    assert (accepted["status"], submitted["status"], error["status"]) == ("accepted", "submitted", "error")
+    assert (submitted["submission_index"], error["submission_index"]) == (1, 2)
+    assert submitted["recipe_path"].endswith("a.yaml")
+    assert error["recipe_path"].endswith("b.yaml")
+
+
+def test_directory_aborts_on_setup_incomplete_via_apply(monkeypatch, tmp_path, capsys):
+    directory = _recipes(tmp_path, a=MINIMAL_CONFIG, b=MINIMAL_CONFIG)
+    setup = {"side_effect": SrtFailure(FailureCode.SETUP_INCOMPLETE, "Required binaries not found")}
+    assert _apply(monkeypatch, tmp_path, target=directory, setup=setup) == 1
+    (record,) = _records(capsys)
+    assert record["code"] == "setup_incomplete"
+
+
+def test_sweep_item_two_fails_after_item_one_accepted(monkeypatch, tmp_path, capsys):
+    sweep = {**MINIMAL_CONFIG, "sweep": {"tokens": [1, 2, 3]}}
+    sweep["roles"] = {**MINIMAL_CONFIG["roles"], "prefill": {"nodes": 1, "workers": 1, "args": {"x": "{tokens}"}}}
+    code = _apply(monkeypatch, tmp_path, config=sweep, extra_patches=(_fail_preflight_on_call(2),))
+    accepted, submitted, error = _records(capsys)
+    assert code == 3
+    assert (accepted["submission_index"], submitted["submission_index"], error["submission_index"]) == (1, 1, 2)
+    assert error["parameters"] == {"tokens": 2}
+
+
+def test_override_variant_identity(monkeypatch, tmp_path, capsys):
+    override = {"base": MINIMAL_CONFIG, "override_x": {"name": "x-job"}}
+    code = _apply(monkeypatch, tmp_path, config=override, extra_patches=(_fail_preflight_on_call(1),))
+    (record,) = _records(capsys)
+    assert code == 1
+    assert record["variant"] == "override_x"
+
+
+def test_empty_directory_no_submissions(monkeypatch, tmp_path, capsys):
+    directory = _recipes(tmp_path)
+    assert _apply(monkeypatch, tmp_path, target=directory) == 0
+    assert _records(capsys) == [{"schema_version": 1, "status": "no-submissions"}]
+
+
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_failures_file_written_with_and_without_json(monkeypatch, tmp_path, json_mode):
+    path = tmp_path / "out" / "failures.jsonl"
+    _apply(monkeypatch, tmp_path, json_mode=json_mode, config={"name": "x"}, args=("--failures-file", str(path)))
+    (record,) = [json.loads(line) for line in path.read_text().splitlines()]
+    assert record["status"] == "error"
+
+
+def test_dry_run_directory_with_bad_file_still_exits_0(monkeypatch, tmp_path):
+    directory = _recipes(tmp_path, a=MINIMAL_CONFIG, b="name: [broken\n")
+    monkeypatch.setattr(sys, "argv", ["srtctl", "dry-run", "-f", str(directory)])
+    with patch("srtctl.cli.submit.get_srtslurm_setting", return_value=None), patch("srtctl.cli.submit.validate_setup"):
+        try:
+            submit_cli.main()
+            code = 0
+        except SystemExit as exc:
+            code = exc.code or 0
+    assert code == 0

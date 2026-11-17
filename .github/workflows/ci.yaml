@@ -168,7 +168,8 @@ jobs:
 
           uv run python - <<'PY'
           import json, pathlib, time
-          sub = json.loads(pathlib.Path("/tmp/submission.json").read_text().strip())
+          records = [json.loads(line) for line in pathlib.Path("/tmp/submission.json").read_text().splitlines()]
+          sub = next(r for r in records if r["status"] == "submitted")
           assert sub["status"] == "submitted", sub
           output_dir = pathlib.Path(sub["output_dir"])
           result_path = output_dir / "result.json"

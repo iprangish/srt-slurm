@@ -135,5 +135,6 @@ class ApplyReport:
             self.json_out.write(line + "\n")
             self.json_out.flush()
         if failure and self.failures_file is not None:
+            self.failures_file.parent.mkdir(parents=True, exist_ok=True)
             with self.failures_file.open("a") as handle:
                 handle.write(line + "\n")

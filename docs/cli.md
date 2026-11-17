@@ -568,6 +568,65 @@ The JSON Schema checks shape only (unknown keys, types, enums, required keys). C
 
 The MCP server (`srtctl-mcp`, stdio by default, `SRTCTL_MCP_TRANSPORT=streamable-http` with `SRTCTL_MCP_HOST` / `SRTCTL_MCP_PORT` for HTTP) exposes the schema tools anywhere and the job lifecycle tools (`submit_job`, `dry_run`, `job_status`, `job_logs`, `list_jobs`, `cancel_job`) when it runs on a Slurm login node in a checkout with `srtslurm.yaml`. `job_status` returns the Slurm accounting row, the job metadata, the orchestrator's current stage, any `[ERROR]` lines, the benchmark rollup, and the sweep-log tail; `job_logs` lists `outputs/<job_id>/logs` or tails one file.
 
+## Machine-readable output (`--json`)
+
+`srtctl apply --json` writes newline-delimited JSON records to stdout and sends all prose to stderr. Each record has `schema_version` (`1`) and a `status`:
+
+- `accepted`: Slurm accepted a job. Printed as soon as the job ID exists, before the post-submit bookkeeping, so a later failure never hides the job.
+- `submitted`: the submission finished. Carries `slurm_job_id`, `job_name`, `output_dir`, `applied_overrides` and `pinned_sources` when present.
+- `error`: a failure record, described below.
+- `no-submissions`: nothing was submitted and nothing failed, for example an empty directory.
+
+Without `--json` the same facts are printed as prose, one line per failure (`Error [code]: message`), so the information shown and the exit code never depend on the flag.
+
+When one invocation produces several submissions (a directory, a sweep, an override file), each record carries `submission_index` (1-based) and the identity of its submission: `recipe_path` for a file, `parameters` for a sweep point, `variant` for an override variant. A failing submission does not stop the others, except that an incomplete srtctl setup (`setup_incomplete`) aborts a directory run.
+
+### Failure records
+
+| Field | Meaning |
+| --- | --- |
+| `status` | Always `error`. |
+| `code` | Stable failure category (table below). |
+| `subcode` | Finer detail when known, for example the Slurm error name for `sbatch_rejected`. |
+| `error` | Human-readable message. |
+| `cause` | The underlying failure, with the observed subset of `producer`, `code`, `return_code` and `message`. |
+| `issues` | List of `{code, field, message}` for `preflight_failed`. |
+| `slurm_job_id`, `output_dir` | Present when Slurm had already accepted the job. |
+
+Values that were not observed are omitted, never `null`.
+
+| Code | Raised when |
+| --- | --- |
+| `invocation_invalid` | The command line is wrong: unknown flag, bad `--set` or selector, missing recipe, empty stdin. |
+| `recipe_invalid` | The recipe is not valid YAML or fails validation, or cannot run under the selected launcher. |
+| `recipe_schema_unsupported` | The recipe declares a schema this srtctl does not load. |
+| `setup_incomplete` | The srtctl installation is missing required binaries. |
+| `preflight_failed` | Pre-submit checks of model, container or telemetry paths failed. |
+| `sbatch_rejected` | `sbatch` refused the job; `subcode` names the Slurm error when recognised. |
+| `submission_failed` | Submission failed for another reason. |
+| `job_preparation_failed` | The job was accepted but copying its recipe into the output directory failed. |
+| `sbatch_archive_failed` | The job was accepted but archiving its sbatch script failed. |
+| `metadata_write_failed` | The job was accepted but writing its metadata file failed. |
+| `unknown` | Any failure not classified above. |
+
+### Exit codes
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Every submission succeeded (or there was nothing to submit). |
+| `1` | A failure with no accepted job. |
+| `2` | Invalid invocation. Argparse's usage text is still printed to stderr. |
+| `3` | Partial: at least one job was accepted and at least one failure was reported. |
+
+`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed.
+
+### Reading the output as a client
+
+- A record states what happened to a submission; `code` is the cause. Decide on `status` first, then read `code`.
+- A failed job with no failure record is unclassified, not successful.
+- A failure record never proves that no job exists. If it carries `slurm_job_id`, or an `accepted` record for the same `submission_index` precedes it, Slurm accepted that job.
+- Under `launcher: docker` the job runs in the foreground after `submitted`, and the exit code after that record is the job's own.
+
 ## Output
 
 When you submit a job, `srtctl` creates an output directory:

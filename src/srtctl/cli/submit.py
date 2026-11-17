@@ -15,6 +15,7 @@ Usage:
 
 import argparse
 import contextlib
+import io
 import json
 import logging
 import os
@@ -30,17 +31,19 @@ from pathlib import Path
 from typing import Any, cast
 
 import yaml
+from marshmallow import ValidationError
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
+from ruamel.yaml.error import YAMLError as RuamelYAMLError
 
 from srtctl.backends import VLLMBackend, VLLMMooncakeKVStoreConfig
 from srtctl.backends.base import WorkerMode
 from srtctl.cli.apply_report import ApplyReport
-from srtctl.contract.failures import FailureCode, SrtFailure
+from srtctl.contract.failures import FailureCode, InvocationError, SrtFailure
 from srtctl.core.config import (
     expand_engine_config_defaults,
     generate_override_configs,
@@ -91,6 +94,7 @@ logger = logging.getLogger(__name__)
 
 # Rebound by main() for `apply`; collects accepted submissions and failures.
 _report: ApplyReport = ApplyReport()
+_RECIPE_ERRORS = (ValueError, TypeError, yaml.YAMLError, RuamelYAMLError, ValidationError)
 
 # Rendered --set/--unset overrides for the current invocation; echoed into every
 # submission record so a caller can see exactly what was applied.
@@ -1280,15 +1284,16 @@ def submit_with_orchestrator(
         resolved_runtime_config_text = runtime_config_text
         runtime_config_filename = f"config_{variant_suffix}.yaml" if variant_suffix else "config_resolved.yaml"
 
-    script_content = generate_minimal_sbatch_script(
-        config=config,
-        config_path=config_path,
-        setup_script=setup_script,
-        output_dir=output_dir,
-        runtime_config_filename=runtime_config_filename,
-        serve_only=serve_only,
-        staged_config_dir=render_dir,
-    )
+    with _report.phase(FailureCode.RECIPE_INVALID, ValueError, TypeError):
+        script_content = generate_minimal_sbatch_script(
+            config=config,
+            config_path=config_path,
+            setup_script=setup_script,
+            output_dir=output_dir,
+            runtime_config_filename=runtime_config_filename,
+            serve_only=serve_only,
+            staged_config_dir=render_dir,
+        )
 
     # Identity validation (inline, <1s) — runs for both dry-run and submit
     if config.identity and config.identity.model and config.identity.model.repo:
@@ -1527,7 +1532,8 @@ def submit_single(
         job_id string on success, None for dry_run.
     """
     if config is None and config_path:
-        config = load_config(config_path)
+        with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+            config = load_config(config_path)
 
     if config is None:
         raise ValueError("Either config_path or config must be provided")
@@ -1590,10 +1596,10 @@ def submit_sweep(
     """
     from srtctl.core.sweep import generate_sweep_configs
 
-    with open(config_path) as f:
-        sweep_config = yaml.safe_load(f)
-
-    configs = generate_sweep_configs(sweep_config)
+    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+        with open(config_path) as f:
+            sweep_config = yaml.safe_load(f)
+        configs = generate_sweep_configs(sweep_config)
 
     # Display sweep table
     table = Table(title=f"Sweep: {sweep_config.get('name', 'unnamed')} ({len(configs)} jobs)")
@@ -1647,7 +1653,7 @@ def submit_sweep(
     ) as progress:
         task = progress.add_task("Submitting jobs...", total=len(configs))
 
-        for i, (config_dict, _params) in enumerate(configs, 1):
+        for i, (config_dict, params) in enumerate(configs, 1):
             job_name = config_dict.get("name", f"job_{i}")
             progress.update(task, description=f"[{i}/{len(configs)}] {job_name}")
 
@@ -1657,16 +1663,18 @@ def submit_sweep(
                 with os.fdopen(fd, "w") as f:
                     yaml.dump(config_dict, f)
 
-                config = load_config(Path(temp_config_path))
-                submit_single(
-                    config_path=Path(temp_config_path),
-                    config=config,
-                    dry_run=False,
-                    setup_script=setup_script,
-                    tags=tags,
-                    output_dir=output_dir,
-                    enforce_preflight=enforce_preflight,
-                )
+                with _report.item(parameters=params):
+                    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+                        config = load_config(Path(temp_config_path))
+                    submit_single(
+                        config_path=Path(temp_config_path),
+                        config=config,
+                        dry_run=False,
+                        setup_script=setup_script,
+                        tags=tags,
+                        output_dir=output_dir,
+                        enforce_preflight=enforce_preflight,
+                    )
             finally:
                 with contextlib.suppress(OSError):
                     os.remove(temp_config_path)
@@ -1748,38 +1756,42 @@ def submit_directory(
         console.print(f"[bold]({i}/{len(yaml_files)})[/] Processing: {relative_path}")
 
         try:
-            if is_override_config(yaml_file):
-                submit_override(
-                    yaml_file,
-                    dry_run=dry_run,
-                    setup_script=setup_script,
-                    tags=tags,
-                    output_dir=output_dir,
-                    enforce_preflight=enforce_preflight,
-                )
-            elif force_sweep or is_sweep_config(yaml_file):
-                submit_sweep(
-                    yaml_file,
-                    dry_run=dry_run,
-                    setup_script=setup_script,
-                    tags=tags,
-                    output_dir=output_dir,
-                    enforce_preflight=enforce_preflight,
-                )
-            else:
-                submit_single(
-                    config_path=yaml_file,
-                    dry_run=dry_run,
-                    setup_script=setup_script,
-                    tags=tags,
-                    output_dir=output_dir,
-                    enforce_preflight=enforce_preflight,
-                )
+            with _report.item(recipe_path=str(yaml_file)):
+                if is_override_config(yaml_file):
+                    submit_override(
+                        yaml_file,
+                        dry_run=dry_run,
+                        setup_script=setup_script,
+                        tags=tags,
+                        output_dir=output_dir,
+                        enforce_preflight=enforce_preflight,
+                    )
+                elif force_sweep or is_sweep_config(yaml_file):
+                    submit_sweep(
+                        yaml_file,
+                        dry_run=dry_run,
+                        setup_script=setup_script,
+                        tags=tags,
+                        output_dir=output_dir,
+                        enforce_preflight=enforce_preflight,
+                    )
+                else:
+                    submit_single(
+                        config_path=yaml_file,
+                        dry_run=dry_run,
+                        setup_script=setup_script,
+                        tags=tags,
+                        output_dir=output_dir,
+                        enforce_preflight=enforce_preflight,
+                    )
             success_count += 1
         except Exception as e:
             if isinstance(e, SrtFailure) and e.code is FailureCode.SETUP_INCOMPLETE:
                 raise
-            console.print(f"[bold red]  ❌ Error:[/] {e}")
+            if isinstance(e, SrtFailure):
+                console.print(Text.assemble(("  ❌ ", "bold red"), e.human_line()))
+            else:
+                console.print(f"[bold red]  ❌ Error:[/] {e}")
             logger.debug("Full traceback:", exc_info=True)
             error_count += 1
 
@@ -1815,7 +1827,7 @@ def parse_config_arg(arg: str) -> tuple[Path, str | None]:
     if ":" in arg:
         path_str, selector = arg.rsplit(":", 1)
         if not path_str.strip():
-            raise ValueError("Invalid config path in selector syntax.")
+            raise InvocationError("Invalid config path in selector syntax.")
         valid = bool(
             selector == "base"
             or re.fullmatch(r"override_\S+", selector)
@@ -1824,7 +1836,7 @@ def parse_config_arg(arg: str) -> tuple[Path, str | None]:
             or ("*" in selector or "?" in selector)
         )
         if not valid:
-            raise ValueError(
+            raise InvocationError(
                 f"Invalid selector '{selector}'. "
                 "Must be 'base', 'override_<name>', 'zip_override_<name>', "
                 "'zip_override_<name>[N]', or a glob pattern like '*mtp*'."
@@ -1864,23 +1876,29 @@ def materialize_config_path(config_path: Path, overrides: Sequence[Any] = (), *,
         return
     if not from_stdin and (not config_path.exists() or config_path.is_dir()):
         if config_path.is_dir() and overrides:
-            raise ValueError("--set/--unset apply to a single config file, not a directory")
+            raise InvocationError("--set/--unset apply to a single config file, not a directory")
         yield config_path  # let the caller report the missing file, or handle the directory
         return
 
     payload = sys.stdin.read() if from_stdin else config_path.read_text()
     if not payload.strip():
-        raise ValueError("No YAML received on stdin" if from_stdin else f"{config_path} is empty")
+        if from_stdin:
+            raise InvocationError("No YAML received on stdin")
+        with _report.phase(FailureCode.RECIPE_INVALID, ValueError):
+            raise ValueError(f"{config_path} is empty")
 
     changed = from_stdin
     if overrides or pin_sources:
         from srtctl.core.yaml_utils import dump_yaml_with_comments, load_yaml_text_with_comments
 
-        document = load_yaml_text_with_comments(payload)
+        with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+            document = load_yaml_text_with_comments(payload)
         if overrides:
             from srtctl.core.overrides import apply_overrides_to_recipe
 
-            for entry in apply_overrides_to_recipe(document, overrides):
+            with _report.phase(FailureCode.INVOCATION_INVALID, ValueError, TypeError):
+                applied = apply_overrides_to_recipe(document, overrides)
+            for entry in applied:
                 logger.info("Applied override: %s", entry)
             changed = True
         if pin_sources and "source" in payload:
@@ -1940,10 +1958,10 @@ def submit_override(
             submit_sweep).
         serve_only: Keep the inference endpoint running without launching a benchmark.
     """
-    with open(config_path) as f:
-        raw_config = yaml.safe_load(f)
-
-    override_configs = generate_override_configs(raw_config, selector=selector)
+    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+        with open(config_path) as f:
+            raw_config = yaml.safe_load(f)
+        override_configs = generate_override_configs(raw_config, selector=selector)
     if render_dir is not None and len(override_configs) != 1:
         raise ValueError(
             "render needs exactly one variant: pass a selector (-f config.yaml:base or -f config.yaml:override_name) "
@@ -1965,61 +1983,66 @@ def submit_override(
     from srtctl.core.config import resolve_override_yaml
     from srtctl.core.yaml_utils import dump_yaml_with_comments
 
-    resolved_variants = resolve_override_yaml(config_path, selector=selector)
+    with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+        resolved_variants = resolve_override_yaml(config_path, selector=selector)
     if serve_only and len(resolved_variants) != 1:
-        raise ValueError("--serve-only requires an override selector that resolves to exactly one job")
+        raise InvocationError("--serve-only requires an override selector that resolves to exactly one job")
 
     for i, (suffix, config_cm) in enumerate(resolved_variants, 1):
         variant_label = "base" if suffix == "base" else f"override_{suffix}"
-        job_name = config_cm.get("name", "unnamed")
-        runtime_config_text = dump_yaml_with_comments(config_cm)
-        if runtime_config_text is None:
-            raise RuntimeError("dump_yaml_with_comments returned None unexpectedly")
+        with _report.item(variant=variant_label):
+            job_name = config_cm.get("name", "unnamed")
+            runtime_config_text = dump_yaml_with_comments(config_cm)
+            if runtime_config_text is None:
+                raise RuntimeError("dump_yaml_with_comments returned None unexpectedly")
 
-        if dry_run:
-            console.print(f"[bold cyan][{i}/{len(override_configs)}][/] {variant_label}: {job_name}")
+            if dry_run:
+                console.print(f"[bold cyan][{i}/{len(override_configs)}][/] {variant_label}: {job_name}")
 
-        logger.info(f"Override variant: {variant_label} -> {job_name}")
+            logger.info(f"Override variant: {variant_label} -> {job_name}")
 
-        resolved_config = resolve_config_with_defaults(yaml.safe_load(runtime_config_text), load_cluster_config())
-        # Same expansions load_config applies, so the dry-run details and the
-        # sbatch-time config match what the in-job loader will run with.
-        expand_engine_config_defaults(resolved_config)
-        config = SrtConfig.Schema().load(resolved_config)
+            with _report.phase(FailureCode.RECIPE_INVALID, *_RECIPE_ERRORS):
+                resolved_config = resolve_config_with_defaults(
+                    yaml.safe_load(runtime_config_text), load_cluster_config()
+                )
+                # Same expansions load_config applies, so the dry-run details and the
+                # sbatch-time config match what the in-job loader will run with.
+                expand_engine_config_defaults(resolved_config)
+                config = SrtConfig.Schema().load(resolved_config)
 
-        if "sweep" in config_cm:
-            if serve_only:
-                raise ValueError("--serve-only does not support sweep configs")
-            fd, temp_config_path = tempfile.mkstemp(suffix=".yaml", prefix="srtctl_override_", text=True)
-            try:
-                with os.fdopen(fd, "w") as f:
-                    f.write(runtime_config_text)
-                submit_sweep(
-                    config_path=Path(temp_config_path),
+            if "sweep" in config_cm:
+                if serve_only:
+                    raise InvocationError("--serve-only does not support sweep configs")
+                fd, temp_config_path = tempfile.mkstemp(suffix=".yaml", prefix="srtctl_override_", text=True)
+                try:
+                    with os.fdopen(fd, "w") as f:
+                        f.write(runtime_config_text)
+                    submit_sweep(
+                        config_path=Path(temp_config_path),
+                        dry_run=dry_run,
+                        setup_script=setup_script,
+                        tags=tags,
+                        output_dir=output_dir,
+                        enforce_preflight=enforce_preflight,
+                    )
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.remove(temp_config_path)
+            else:
+                submit_single(
+                    config_path=config_path,
+                    config=config,
                     dry_run=dry_run,
                     setup_script=setup_script,
                     tags=tags,
                     output_dir=output_dir,
+                    variant_suffix=suffix,
+                    source_config_path=config_path,
+                    runtime_config_text=runtime_config_text,
                     enforce_preflight=enforce_preflight,
+                    serve_only=serve_only,
+                    render_dir=render_dir,
                 )
-            finally:
-                with contextlib.suppress(OSError):
-                    os.remove(temp_config_path)
-        else:
-            submit_single(
-                config_path=config_path,
-                config=config,
-                dry_run=dry_run,
-                setup_script=setup_script,
-                tags=tags,
-                output_dir=output_dir,
-                variant_suffix=suffix,
-                source_config_path=config_path,
-                runtime_config_text=runtime_config_text,
-                enforce_preflight=enforce_preflight,
-                serve_only=serve_only,
-                render_dir=render_dir,
-            )
 
 
 def resolve_override_cmd(
@@ -2266,7 +2289,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         dest="json_output",
-        help="Emit one JSON line per submission on stdout; prose output goes to stderr.",
+        help="Write newline-delimited JSON records to stdout (accepted, submitted and failure records); "
+        "prose goes to stderr.",
+    )
+    apply_parser.add_argument(
+        "--failures-file",
+        type=Path,
+        dest="failures_file",
+        help="Append every failure record of this run, as JSON lines, to this file.",
     )
     apply_parser.add_argument(
         "--mock",
@@ -2574,6 +2604,22 @@ def main():
         _report = ApplyReport()
 
 
+@contextlib.contextmanager
+def _report_usage_errors():
+    """Echo argparse's stderr; for `apply --json`, also emit its usage error as an invocation_invalid record."""
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(captured):
+            yield
+    except SystemExit as exc:
+        if exc.code == 2 and "apply" in sys.argv and "--json" in sys.argv:
+            message = captured.getvalue().strip().rsplit("error: ", 1)[-1]
+            ApplyReport(active=True, json_out=sys.stdout).fail(InvocationError(message))
+        raise
+    finally:
+        sys.stderr.write(captured.getvalue())
+
+
 def _run():
     # If no args at all, launch interactive mode
     if len(sys.argv) == 1:
@@ -2584,7 +2630,20 @@ def _run():
     setup_logging()
 
     parser = build_parser()
-    args = parser.parse_args()
+    with _report_usage_errors():
+        args = parser.parse_args()
+        mock_mode = bool(getattr(args, "mock_mode", False))
+        serve_only = bool(getattr(args, "serve_only", False))
+        if serve_only and mock_mode:
+            parser.error("--serve-only cannot be combined with --mock")
+        if serve_only and getattr(args, "sweep", False):
+            parser.error("--serve-only does not support sweeps")
+        from srtctl.core.overrides import parse_overrides
+
+        try:
+            overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
+        except ValueError as exc:
+            parser.error(str(exc))
 
     if args.command in ("dsight", "dashboard"):
         from srtctl.dsight.cli import run as run_dashboard
@@ -2593,12 +2652,6 @@ def _run():
 
     json_mode = bool(getattr(args, "json_output", False))
     render_dir: Path | None = getattr(args, "render_dir", None)
-    mock_mode = bool(getattr(args, "mock_mode", False))
-    serve_only = bool(getattr(args, "serve_only", False))
-    if serve_only and mock_mode:
-        parser.error("--serve-only cannot be combined with --mock")
-    if serve_only and getattr(args, "sweep", False):
-        parser.error("--serve-only does not support sweeps")
 
     # Always rebind the module console on each invocation so json-mode prose
     # goes to stderr and non-json prose returns to stdout. Save the original
@@ -2615,14 +2668,12 @@ def _run():
         console = _original_console
 
     global _report
-    _report = ApplyReport(active=args.command == "apply", json_out=sys.stdout if json_mode else None)
+    _report = ApplyReport(
+        active=args.command == "apply",
+        json_out=sys.stdout if json_mode else None,
+        failures_file=getattr(args, "failures_file", None),
+    )
 
-    from srtctl.core.overrides import parse_overrides
-
-    try:
-        overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
-    except ValueError as exc:
-        parser.error(str(exc))
     global _active_overrides
     _active_overrides = [override.render() for override in overrides]
 
@@ -2799,13 +2850,12 @@ def _run():
         )
         return
 
-    # Parse config arg: supports path:selector format for overrides
-    config_path, selector = parse_config_arg(args.config)
-
     is_dry_run = args.command == "dry-run"
     tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()] or None
 
     try:
+        # Supports path:selector format for overrides
+        config_path, selector = parse_config_arg(args.config)
         with (
             contextlib.nullcontext() if config_path.is_dir() else _report.item(recipe_path=args.config),
             materialize_config_path(
@@ -2813,8 +2863,7 @@ def _run():
             ) as effective_config_path,
         ):
             if not effective_config_path.exists():
-                console.print(f"[bold red]Config not found:[/] {config_path}")
-                sys.exit(1)
+                raise InvocationError(f"Config not found: {config_path}")
 
             # resolve-override has its own simple dispatch path
             if args.command == "resolve-override":
@@ -2923,7 +2972,7 @@ def _run():
                 is_sweep = args.sweep or is_sweep_config(effective_config_path)
                 if is_sweep:
                     if serve_only:
-                        raise ValueError("--serve-only does not support sweep configs")
+                        raise InvocationError("--serve-only does not support sweep configs")
                     if render_dir is not None:
                         raise ValueError("render does not support sweep configs; render one variant at a time")
                     submit_sweep(
