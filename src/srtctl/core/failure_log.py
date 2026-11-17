@@ -28,13 +28,16 @@ class FailureLog:
         self._file = file
         self._stdout = stdout
         self._written_processes: set[str] = set()
-        self._count = 0
+        self._enabled = True
+        self.written = False
         self.registry: ProcessRegistry | None = None
 
     @classmethod
     def disabled(cls) -> "FailureLog":
         """A log that writes nothing."""
-        return cls(Path(), slurm_job_id="", restart_count=0, file=False)
+        log = cls(Path(), slurm_job_id="", restart_count=0, file=False)
+        log._enabled = False
+        return log
 
     @classmethod
     def from_env(cls, config_path: Path) -> "FailureLog | None":
@@ -46,11 +49,6 @@ class FailureLog:
         log_dir = (Path(output_dir) if output_dir else config_path.parent) / "logs"
         return cls(log_dir, slurm_job_id=job_id, restart_count=int(os.environ.get("SLURM_RESTART_COUNT", "0")))
 
-    @property
-    def written(self) -> bool:
-        """Whether any record was written."""
-        return self._count > 0
-
     def rotate(self) -> None:
         """Move a previous attempt's file to the next free ``failures.<N>.jsonl``."""
         if not self._path.exists():
@@ -61,21 +59,28 @@ class FailureLog:
         self._path.rename(rotated)
 
     def write(self, failure: SrtFailure) -> None:
-        """Log the human line and append the record."""
+        """Log the human line and append the record; never raises."""
+        if not self._enabled:
+            return
         failure.identity = dict(self._identity)
         logger.error(failure.human_line())
-        self._count += 1
+        self.written = True
         line = json.dumps(failure.record())
         if self._file:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            with self._path.open("a") as f:
-                f.write(line + "\n")
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                with self._path.open("a") as f:
+                    f.write(line + "\n")
+            except OSError as e:
+                logger.warning("Could not write failure record to %s: %s", self._path, e)
         if self._stdout:
             print(f"SRT_FAILURE {line}", flush=True)
 
     def flush_process_failures(self) -> bool:
         """Write a record per newly failed process; return whether any process failed."""
-        failures = self.registry.failures() if self.registry is not None else []
+        if not self._enabled or self.registry is None:
+            return False
+        failures = self.registry.failures()
         for name, exit_code, detail in failures:
             if name not in self._written_processes:
                 self._written_processes.add(name)

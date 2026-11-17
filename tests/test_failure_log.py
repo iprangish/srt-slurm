@@ -58,9 +58,28 @@ def test_file_created_lazily_and_stdout_copy_is_opt_in(tmp_path, capsys):
     assert not no_file.exists()
 
 
-def test_disabled_writes_nothing(tmp_path, capsys):
-    FailureLog.disabled().write(_failure())
-    assert capsys.readouterr().out == ""
+def test_disabled_is_inert(capsys, caplog):
+    log = FailureLog.disabled()
+    log.registry = _registry()
+    log.registry.record_failure("decode_0")
+    failure = _failure()
+    with caplog.at_level(logging.ERROR):
+        log.write(failure)
+        assert log.flush_process_failures() is False
+        log.write_unless_process_failed(failure)
+
+    assert not log.written and failure.identity == {} and caplog.text == "" and capsys.readouterr().out == ""
+    assert not (Path() / "failures.jsonl").exists()
+    assert log._written_processes == set()
+
+
+def test_write_never_raises_on_io_error(tmp_path, caplog):
+    blocker = tmp_path / "logs"
+    blocker.write_text("a file, not a directory")
+    log = FailureLog(blocker, slurm_job_id="42", restart_count=0)
+    with caplog.at_level(logging.WARNING):
+        log.write(_failure())
+    assert "Could not write failure record" in caplog.text
 
 
 def test_rotate_renames_previous_attempt(tmp_path):
@@ -73,7 +92,7 @@ def test_rotate_renames_previous_attempt(tmp_path):
     assert (tmp_path / "failures.1.jsonl").read_text() == "old\n"
 
 
-def _registry(tmp_path: Path) -> ProcessRegistry:
+def _registry() -> ProcessRegistry:
     registry = ProcessRegistry("1")
     for name in ("decode_0", "prefill_0"):
         registry.add_process(ManagedProcess(name=name, popen=SimpleNamespace(pid=1, poll=lambda: 1), log_file=None))
@@ -81,7 +100,7 @@ def _registry(tmp_path: Path) -> ProcessRegistry:
 
 
 def test_process_failures_written_once_in_detection_order(tmp_path):
-    registry = _registry(tmp_path)
+    registry = _registry()
     registry.record_failure("decode_0", "Rank0 Task exit code: 1")
     registry.record_failure("prefill_0")
     log = FailureLog(tmp_path, slurm_job_id="42", restart_count=0)
@@ -162,7 +181,9 @@ def test_from_env_resolves_log_dir_and_restart_count(tmp_path, monkeypatch):
     assert (record["slurm_job_id"], record["restart_count"]) == ("42", 3)
 
     monkeypatch.setenv("SRTCTL_OUTPUT_DIR", str(tmp_path / "out"))
-    FailureLog.from_env(tmp_path / "recipe.yaml").write(_failure())  # type: ignore[union-attr]
+    log2 = FailureLog.from_env(tmp_path / "recipe.yaml")
+    assert log2 is not None
+    log2.write(_failure())
     assert (tmp_path / "out" / "logs" / "failures.jsonl").exists()
 
 
@@ -182,3 +203,18 @@ def test_reporting_failures_defaults_and_cluster_block_rule():
     assert own is not None and own.failures is None
     assert ReportingConfig.Schema().load({"failures": {}}).failures.file is True
     assert ReportingConfig.Schema().load({"failures": {}}).failures.stdout is False
+
+
+def test_raising_signal_hook_does_not_skip_cleanup(restore_signal_handlers):
+    order: list[str] = []
+    registry = ProcessRegistry("1")
+    registry.cleanup = lambda: order.append("cleanup")  # type: ignore[method-assign]
+
+    def hook(name: str) -> None:
+        raise RuntimeError("hook broke")
+
+    stop = threading.Event()
+    setup_signal_handlers(stop, registry, on_signal=hook)
+    with pytest.raises(SystemExit):
+        signal.raise_signal(signal.SIGTERM)
+    assert order == ["cleanup"] and stop.is_set()

@@ -575,7 +575,10 @@ def setup_signal_handlers(
         sig_name = signal.Signals(signum).name
         logger.warning("Received signal %s, initiating cleanup...", sig_name)
         if on_signal is not None and registry.received_signal is None:
-            on_signal(sig_name)
+            try:
+                on_signal(sig_name)
+            except Exception:
+                logger.exception("Failure hook raised; continuing shutdown")
         registry.received_signal = sig_name
         stop_event.set()
         registry.cleanup()
