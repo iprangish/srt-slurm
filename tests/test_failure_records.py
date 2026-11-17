@@ -3,7 +3,9 @@
 
 """Tests for the failure record contract."""
 
-from srtctl.contract.failures import Cause, FailureCode, SrtFailure, as_failure
+import pytest
+
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure, as_failure, reraise_as
 from srtctl.version import version_info
 
 
@@ -42,6 +44,21 @@ def test_as_failure_wraps_unknown_and_passes_failures_through():
     assert wrapped.code is FailureCode.UNKNOWN
     assert str(wrapped) == "bad"
     assert as_failure(KeyError()).args[0] == "KeyError"
+
+
+def test_reraise_as_relabels_only_the_listed_types():
+    with pytest.raises(SrtFailure) as excinfo, reraise_as(FailureCode.RECIPE_INVALID, ValueError):
+        raise ValueError("bad")
+    assert (excinfo.value.code, excinfo.value.message) == (FailureCode.RECIPE_INVALID, "bad")
+    assert isinstance(excinfo.value.__cause__, ValueError)
+
+    failure = SrtFailure(FailureCode.PREFLIGHT_FAILED, "kept")
+    with pytest.raises(SrtFailure) as excinfo, reraise_as(FailureCode.RECIPE_INVALID, RuntimeError):
+        raise failure
+    assert excinfo.value is failure
+
+    with pytest.raises(KeyError), reraise_as(FailureCode.RECIPE_INVALID, ValueError):
+        raise KeyError("other")
 
 
 def test_version_info_reports_record_schema_version():

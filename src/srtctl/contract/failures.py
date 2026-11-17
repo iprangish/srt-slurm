@@ -3,6 +3,8 @@
 
 """Failure codes and the structured failure record shared by ``srtctl apply`` and the in-job coordinator."""
 
+from collections.abc import Generator
+from contextlib import contextmanager
 from enum import Enum
 from typing import Any
 
@@ -97,6 +99,17 @@ def as_failure(exc: BaseException) -> SrtFailure:
     if isinstance(exc, SrtFailure):
         return exc
     return SrtFailure(FailureCode.UNKNOWN, str(exc) or type(exc).__name__)
+
+
+@contextmanager
+def reraise_as(code: FailureCode, *expected: type[BaseException]) -> Generator[None]:
+    """Re-raise ``expected`` exceptions as ``SrtFailure(code)``; an ``SrtFailure`` passes through unchanged."""
+    try:
+        yield
+    except expected as exc:
+        if isinstance(exc, SrtFailure):
+            raise
+        raise SrtFailure(code, str(exc)) from exc
 
 
 class InvocationError(SrtFailure, ValueError):
