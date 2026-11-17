@@ -117,7 +117,7 @@ def test_health_gate_timeout_records_health_check_timeout(tmp_path):
 
     (record,) = _records(tmp_path)
     assert record["code"] == "health_check_timeout"
-    assert record["cause"] == {"producer": "dynamo"}
+    assert "cause" not in record
     reporter.report.assert_called_once_with(JobStatus.FAILED, JobStage.BENCHMARK, "Workers failed health check")
 
 
@@ -251,9 +251,9 @@ def test_raise_site_codes(tmp_path, site, match, code):
     assert raised.value.code is code
 
 
-def _mock_sweep(tmp_path: Path) -> tuple[int, Path]:
+def _mock_sweep(tmp_path: Path, recipe_fields: dict | None = None) -> tuple[int, Path]:
     recipe = tmp_path / "recipe.yaml"
-    recipe.write_text(yaml.dump(MOCK_RECIPE))
+    recipe.write_text(yaml.dump({**MOCK_RECIPE, **(recipe_fields or {})}))
     output_dir = tmp_path / "outputs" / "4242"
     exit_code = run_mock_sweep(
         config_path=recipe,
@@ -296,9 +296,25 @@ def test_successful_run_writes_nothing(tmp_path):
     assert not (log_dir / "failures.jsonl").exists()
 
 
+def test_raised_failure_in_run_reaches_the_file(tmp_path):
+    with patch.object(SweepOrchestrator, "_run_host_commands", return_value=["node0"]):
+        exit_code, log_dir = _mock_sweep(tmp_path, {"host_setup": {"commands": ["true"]}})
+
+    assert exit_code == 1
+    (record,) = _records(log_dir)
+    assert (record["code"], record["cause"]) == ("infra_service_failed", {"producer": "host_setup"})
+
+
 def test_run_eval_failure_writes_nothing(tmp_path, monkeypatch):
     monkeypatch.setenv("RUN_EVAL", "true")
-    with patch.object(SweepOrchestrator, "_run_post_eval", return_value=1):
+    real_post_eval = SweepOrchestrator._run_post_eval
+
+    def eval_server_down(self, stop_event):
+        with patch("srtctl.cli.do_sweep.wait_for_port", return_value=False):
+            assert real_post_eval(self, stop_event) == 1
+        return 1
+
+    with patch.object(SweepOrchestrator, "_run_post_eval", eval_server_down):
         exit_code, log_dir = _mock_sweep(tmp_path)
 
     assert exit_code == 0
@@ -325,6 +341,18 @@ def test_signal_records_terminated_once_with_subcode(tmp_path, restore_signal_ha
     (record,) = _records(tmp_path / "outputs" / "4242" / "logs")
     assert (record["code"], record["subcode"], record["error"]) == ("terminated", "SIGTERM", "Received SIGTERM")
     assert "cause" not in record
+
+
+def test_signal_during_eval_is_not_followed_by_a_telemetry_record(tmp_path, monkeypatch, restore_signal_handlers):
+    monkeypatch.setenv("RUN_EVAL", "true")
+    with (
+        patch.object(SweepOrchestrator, "_run_post_eval", lambda self, stop: signal.raise_signal(signal.SIGTERM)),
+        patch.object(SweepOrchestrator, "finalize_power_telemetry", return_value=1),
+        pytest.raises(SystemExit),
+    ):
+        _mock_sweep(tmp_path)
+
+    assert _codes(tmp_path / "outputs" / "4242" / "logs") == ["terminated"]
 
 
 def _main(tmp_path: Path, monkeypatch, config_path: Path) -> Path:
@@ -355,3 +383,14 @@ def test_early_exit_load_failure_records_recipe_invalid(tmp_path, monkeypatch):
     log_dir = _main(tmp_path, monkeypatch, recipe)
 
     assert _codes(log_dir) == ["recipe_invalid"]
+
+
+def test_failure_before_run_records_unknown(tmp_path, monkeypatch):
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(yaml.dump(MOCK_RECIPE))
+
+    with patch.object(do_sweep.RuntimeContext, "from_config", side_effect=ValueError("nodelist has 0 nodes")):
+        log_dir = _main(tmp_path, monkeypatch, recipe)
+
+    (record,) = _records(log_dir)
+    assert (record["code"], record["error"]) == ("unknown", "nodelist has 0 nodes")

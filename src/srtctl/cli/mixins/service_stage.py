@@ -212,17 +212,12 @@ class ServiceStageMixin:
             returncode = step.popen.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             terminate_and_reap(step.popen)
-            raise SrtFailure(
-                FailureCode.INFRA_SERVICE_FAILED,
-                f"{what} timed out after {int(timeout)}s and was killed; see {log}",
-                cause=Cause(producer=step.name),
-            ) from None
+            message = f"{what} timed out after {int(timeout)}s and was killed; see {log}"
+            raise SrtFailure(FailureCode.INFRA_SERVICE_FAILED, message, cause=Cause(producer=step.name)) from None
         if returncode != 0:
-            raise SrtFailure(
-                FailureCode.INFRA_SERVICE_FAILED,
-                f"{what} failed (exit {returncode}); see {log}",
-                cause=Cause(producer=step.name, return_code=returncode),
-            )
+            message = f"{what} failed (exit {returncode}); see {log}"
+            cause = Cause(producer=step.name, return_code=returncode)
+            raise SrtFailure(FailureCode.INFRA_SERVICE_FAILED, message, cause=cause)
 
     def _service_container(self, service: ServiceConfig) -> str:
         kind = get_service_kind(service.type)

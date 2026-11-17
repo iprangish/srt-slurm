@@ -261,11 +261,8 @@ class StaticRouterFrontend(Frontend):
             stop_event=stop_event,
         )
         if not ready:
-            raise SrtFailure(
-                FailureCode.HEALTH_CHECK_TIMEOUT,
-                f"Advertised backend endpoints did not become ready before {self.type} startup",
-                cause=Cause(producer=self.type),
-            )
+            message = f"Advertised backend endpoints did not become ready before {self.type} startup"
+            raise SrtFailure(FailureCode.HEALTH_CHECK_TIMEOUT, message, cause=Cause(producer=self.type))
 
     def discovers_workers(self, backend: Any) -> bool:
         """Whether the router learns its workers by registration instead of from its command line.

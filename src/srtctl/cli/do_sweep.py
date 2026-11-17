@@ -359,11 +359,8 @@ class SweepOrchestrator(
         if setup.ignore_failure:
             logger.warning("host_setup failed on %s (ignore_failure: true, continuing)", ", ".join(failures))
             return
-        raise SrtFailure(
-            FailureCode.INFRA_SERVICE_FAILED,
-            f"host_setup failed on: {', '.join(failures)}",
-            cause=Cause(producer="host_setup"),
-        )
+        message = f"host_setup failed on: {', '.join(failures)}"
+        raise SrtFailure(FailureCode.INFRA_SERVICE_FAILED, message, cause=Cause(producer="host_setup"))
 
     # One probe per branch; the first that proves synchronisation prints its
     # evidence and wins, so clock_sync_<node>.out records *which* source
@@ -575,11 +572,8 @@ class SweepOrchestrator(
             if proc.wait() != 0:
                 failures.append((node, log))
         if failures:
-            raise SrtFailure(
-                FailureCode.INFRA_SERVICE_FAILED,
-                "Model staging failed on: " + ", ".join(f"{n} (see {log})" for n, log in failures),
-                cause=Cause(producer="stage_model"),
-            )
+            message = "Model staging failed on: " + ", ".join(f"{n} (see {log})" for n, log in failures)
+            raise SrtFailure(FailureCode.INFRA_SERVICE_FAILED, message, cause=Cause(producer="stage_model"))
         logger.info("Model staging complete on %d node(s)", len(worker_nodes))
 
     def _ensure_model_cached(self) -> None:
@@ -721,14 +715,9 @@ class SweepOrchestrator(
         if os.environ.get("EVAL_ONLY", "false").lower() == "true":
             logger.info("EVAL_ONLY: Waiting for server health before eval...")
             if not self._wait_for_service_ready(stop_event):
-                logger.error("Server did not become healthy for eval")
-                self.failures.write_unless_process_failed(
-                    SrtFailure(
-                        FailureCode.HEALTH_CHECK_TIMEOUT,
-                        "Server did not become healthy for eval",
-                        cause=Cause(producer=self.config.frontend.type),
-                    )
-                )
+                message = "Server did not become healthy for eval"
+                logger.error(message)
+                self.failures.write_unless_process_failed(SrtFailure(FailureCode.HEALTH_CHECK_TIMEOUT, message))
                 return 1
         else:
             if not wait_for_port(eval_node, FRONTEND_PUBLIC_PORT, timeout=30):
@@ -941,23 +930,20 @@ class SweepOrchestrator(
                 logger.info("EVAL_ONLY=true: Skipping benchmark stage and running lm-eval evaluation...")
                 exit_code = self._run_post_eval(stop_event)
                 if exit_code != 0:
-                    logger.error("Eval-only evaluation failed with exit code %d", exit_code)
+                    message = f"Eval-only evaluation failed with exit code {exit_code}"
+                    logger.error(message)
                     if not self.failures.written:
+                        cause = Cause(producer="eval", return_code=exit_code)
                         self.failures.write_unless_process_failed(
-                            SrtFailure(
-                                FailureCode.BENCHMARK_FAILED,
-                                f"Eval-only evaluation failed with exit code {exit_code}",
-                                cause=Cause(producer="eval", return_code=exit_code),
-                            )
+                            SrtFailure(FailureCode.BENCHMARK_FAILED, message, cause=cause)
                         )
                 else:
                     logger.info("Eval-only evaluation completed successfully")
             elif self.power_telemetry_blocks_benchmark():
-                logger.error("Required power telemetry failed startup - skipping the formal benchmark")
-                reporter.report(JobStatus.FAILED, JobStage.BENCHMARK, "Required power telemetry failed startup")
-                self.failures.write(
-                    SrtFailure(FailureCode.TELEMETRY_REQUIRED_FAILED, "Required power telemetry failed startup")
-                )
+                message = "Required power telemetry failed startup"
+                logger.error("%s - skipping the formal benchmark", message)
+                reporter.report(JobStatus.FAILED, JobStage.BENCHMARK, message)
+                self.failures.write(SrtFailure(FailureCode.TELEMETRY_REQUIRED_FAILED, message))
                 exit_code = 1
             else:
                 # Stage 4: Benchmark (status reported AFTER health check passes)
@@ -986,16 +972,16 @@ class SweepOrchestrator(
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
             exit_code = self.finalize_cpu_power_telemetry(exit_code, interrupted=stop_event.is_set())
             exit_code = self.finalize_cpu_power_host_telemetry(exit_code, interrupted=stop_event.is_set())
-            if run_exit_code == 0 and exit_code != 0:
+            if run_exit_code == 0 and exit_code != 0 and not self.failures.written:
                 self.failures.write(
                     SrtFailure(FailureCode.TELEMETRY_REQUIRED_FAILED, "Required telemetry failed after the run")
                 )
-            stop_event.set()
-            registry.cleanup()
             if exit_code != 0 and not self.failures.written:
                 self.failures.write_unless_process_failed(
                     SrtFailure(FailureCode.UNKNOWN, f"Sweep failed with exit code {exit_code}")
                 )
+            stop_event.set()
+            registry.cleanup()
             # After cleanup so the GPUs are idle before node state is reverted.
             self._run_host_teardown()
             if exit_code != 0:
@@ -1041,13 +1027,15 @@ def main():
 
     setup_logging()
 
+    failures = FailureLog.disabled()
     try:
         config_path = Path(args.config)
-        failures = FailureLog.from_env(config_path) or FailureLog.disabled()
+        failures = FailureLog.from_env(config_path) or failures
         failures.rotate()
         if not config_path.exists():
-            logger.error("Config file not found: %s", config_path)
-            failures.write(SrtFailure(FailureCode.JOB_PREPARATION_FAILED, f"Config file not found: {config_path}"))
+            message = f"Config file not found: {config_path}"
+            logger.error(message)
+            failures.write(SrtFailure(FailureCode.JOB_PREPARATION_FAILED, message))
             sys.exit(1)
 
         try:
@@ -1076,8 +1064,10 @@ def main():
 
         sys.exit(exit_code)
 
-    except Exception:
+    except Exception as e:
         logger.exception("Fatal error")
+        if not failures.written:
+            failures.write(as_failure(e))
         sys.exit(1)
 
 

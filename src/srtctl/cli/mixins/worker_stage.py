@@ -821,11 +821,9 @@ class WorkerStageMixin:
             max_attempts=health_cfg.max_attempts,
             interval=health_cfg.interval_seconds,
         ):
-            raise SrtFailure(
-                FailureCode.HEALTH_CHECK_TIMEOUT,
-                f"Sequential node start: worker on {leader.node}:{port} did not become healthy",
-                cause=Cause(producer=f"{leader.node}:{port}"),
-            )
+            worker = f"{leader.node}:{port}"
+            message = f"Sequential node start: worker on {worker} did not become healthy"
+            raise SrtFailure(FailureCode.HEALTH_CHECK_TIMEOUT, message, cause=Cause(producer=worker))
 
     def worker_endpoint_groups(self, processes: list["Process"] | None = None) -> dict[EndpointKey, list["Process"]]:
         """The physical processes of every restart unit, keyed by ``(mode, index, engine)``, in launch order.

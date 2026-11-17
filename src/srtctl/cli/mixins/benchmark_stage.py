@@ -360,14 +360,9 @@ class BenchmarkStageMixin:
         logger.info("Waiting for workers to be ready...")
 
         if not self._wait_for_service_ready(stop_event):
-            logger.error("Server did not become healthy")
-            self.failures.write_unless_process_failed(
-                SrtFailure(
-                    FailureCode.HEALTH_CHECK_TIMEOUT,
-                    "Server did not become healthy",
-                    cause=Cause(producer=self.config.frontend.type),
-                )
-            )
+            message = "Server did not become healthy"
+            logger.error(message)
+            self.failures.write_unless_process_failed(SrtFailure(FailureCode.HEALTH_CHECK_TIMEOUT, message))
             if reporter:
                 stage = JobStage.FRONTEND if serve_only else JobStage.BENCHMARK
                 reporter.report(JobStatus.FAILED, stage, "Workers failed health check")
@@ -430,15 +425,11 @@ class BenchmarkStageMixin:
                 if terminal and all(not proc.is_running for proc in terminal):
                     exit_code = max((proc.exit_code or 0) for proc in terminal)
                     for proc in terminal:
-                        logger.info("Terminal service step %s exited with code %s", proc.name, proc.exit_code)
+                        message = f"Terminal service step {proc.name} exited with code {proc.exit_code}"
+                        logger.info(message)
                         if proc.exit_code:
-                            self.failures.write(
-                                SrtFailure(
-                                    FailureCode.BENCHMARK_FAILED,
-                                    f"Terminal service step {proc.name} exited with code {proc.exit_code}",
-                                    cause=Cause(producer=proc.name, return_code=proc.exit_code),
-                                )
-                            )
+                            cause = Cause(producer=proc.name, return_code=proc.exit_code)
+                            self.failures.write(SrtFailure(FailureCode.BENCHMARK_FAILED, message, cause=cause))
                     if exit_code:
                         logger.error("Terminal service(s) failed; job exit code %d", exit_code)
                     else:
@@ -506,14 +497,10 @@ class BenchmarkStageMixin:
                 cast("TelemetryStageMixin", self).stop_tachometer(tachometer_procs)
 
         if exit_code != 0:
-            logger.error("Benchmark failed with exit code %d", exit_code)
-            self.failures.write_unless_process_failed(
-                SrtFailure(
-                    FailureCode.BENCHMARK_FAILED,
-                    f"Benchmark failed with exit code {exit_code}",
-                    cause=Cause(producer="benchmark", return_code=exit_code),
-                )
-            )
+            message = f"Benchmark failed with exit code {exit_code}"
+            logger.error(message)
+            cause = Cause(producer="benchmark", return_code=exit_code)
+            self.failures.write_unless_process_failed(SrtFailure(FailureCode.BENCHMARK_FAILED, message, cause=cause))
         else:
             logger.info("Benchmark completed successfully")
 
