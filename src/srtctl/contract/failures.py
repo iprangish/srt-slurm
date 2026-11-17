@@ -88,7 +88,7 @@ class SrtFailure(RuntimeError):
         label = self.code.value if self.subcode is None else f"{self.code.value} / {self.subcode}"
         line = f"Error [{label}]: {self.message}"
         if "slurm_job_id" in self.identity and "output_dir" in self.identity:
-            line += f" (job {self.identity['slurm_job_id']} accepted, output {self.identity.get('output_dir')})"
+            line += f" (job {self.identity['slurm_job_id']} accepted, output {self.identity['output_dir']})"
         return line
 
 
