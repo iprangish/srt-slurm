@@ -24,15 +24,15 @@ Records are appended in the order the failures were observed, so the first recor
 | --- | --- |
 | `job_preparation_failed` | The recipe file passed to the coordinator does not exist. |
 | `recipe_invalid` | The recipe fails to load or validate inside the job. |
-| `infra_service_failed` | `host_setup` commands fail on a node (`cause.producer: host_setup`), or model staging fails (`cause.producer: stage_model`). |
+| `infra_service_failed` | `host_setup` commands fail on a node, model staging fails, a service step exits non-zero or times out, or a `services[]` entry exits before it is ready. `cause.producer` is `host_setup`, `stage_model`, or the step or service name. |
 | `telemetry_required_failed` | `telemetry.required` is set and clock-sync, power telemetry or its finalization fails. |
-| `worker_failed` | A managed process (worker, frontend or service) exits abnormally. One record per process; `cause.producer` is the process name and `cause.return_code` its exit code. |
-| `health_check_timeout` | The server did not become healthy, unless a process failure already explains it. |
-| `benchmark_failed` | The benchmark or eval-only run exited non-zero (`cause.producer` names it, with `cause.return_code`), unless a process failure explains it. |
+| `worker_failed` | A managed process (worker, frontend or service) exits abnormally, one record per process (`cause.producer` is the process name, `cause.return_code` its exit code); or a DWDP worker finds no rank-0 endpoint to rendezvous with, which has no process cause. |
+| `health_check_timeout` | Server, frontend, worker or `services[]` readiness did not pass in time. For the server-health waits it is skipped when a process failure already explains it. |
+| `benchmark_failed` | The benchmark or eval-only run exited non-zero (`cause.producer` names it, with `cause.return_code`), unless a process failure explains it; or a terminal service step exits non-zero, one record per step. |
 | `terminated` | The coordinator received a shutdown signal; `subcode` is `SIGTERM` or `SIGINT`. Any process failure that preceded the signal is recorded first. |
 | `unknown` | An unclassified exception, or a non-zero exit with no earlier record. |
 
-A failure explained by an already-written record is not written twice.
+Where a process failure already explains a later failure, it is not written again.
 
 ## Requeued jobs
 
