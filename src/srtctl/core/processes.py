@@ -19,7 +19,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -513,13 +513,13 @@ class ProcessRegistry:
 
         logger.error("=" * 60)
 
-    def failures(self, tail_lines: int = 50) -> list[tuple[str, int | None, str]]:
-        """Recorded failed processes in detection order as ``(name, exit_code, detail)``."""
+    def failures(self, tail_lines: int = 50, skip: Collection[str] = ()) -> list[tuple[str, int | None, str]]:
+        """Recorded failed processes not in ``skip``, in detection order, as ``(name, exit_code, detail)``."""
         with self._lock:
             details = []
             for name in self._failed_processes:
                 proc = self._processes.get(name)
-                if not proc:
+                if not proc or name in skip:
                     continue
                 detail = self._failure_reasons.get(name, "")
                 if not detail and proc.log_file and proc.log_file.exists():

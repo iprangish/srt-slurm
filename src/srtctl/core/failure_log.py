@@ -62,7 +62,10 @@ class FailureLog:
         n = 1
         while (rotated := self._path.with_name(f"failures.{n}.jsonl")).exists():
             n += 1
-        self._path.rename(rotated)
+        try:
+            self._path.rename(rotated)
+        except OSError as e:
+            logger.warning("Could not rotate %s: %s", self._path, e)
 
     def write(self, failure: SrtFailure) -> None:
         """Log the human line and append the record; never raises."""
@@ -86,13 +89,11 @@ class FailureLog:
         """Write a record per newly failed process; return whether any process failed."""
         if not self._enabled or self.registry is None:
             return False
-        failures = self.registry.failures()
-        for name, exit_code, detail in failures:
-            if name not in self._written_processes:
-                self._written_processes.add(name)
-                cause = Cause(producer=name, return_code=exit_code, message=detail or None)
-                self.write(SrtFailure(FailureCode.WORKER_FAILED, f"Process {name} failed", cause=cause))
-        return bool(failures)
+        for name, exit_code, detail in self.registry.failures(skip=self._written_processes):
+            self._written_processes.add(name)
+            cause = Cause(producer=name, return_code=exit_code, message=detail or None)
+            self.write(SrtFailure(FailureCode.WORKER_FAILED, f"Process {name} failed", cause=cause))
+        return bool(self._written_processes)
 
     def write_unless_process_failed(self, failure: SrtFailure) -> None:
         """Write ``failure`` only when no process failure explains it."""

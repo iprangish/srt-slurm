@@ -424,10 +424,11 @@ class BenchmarkStageMixin:
             while not stop_event.is_set():
                 if terminal and all(not proc.is_running for proc in terminal):
                     exit_code = max((proc.exit_code or 0) for proc in terminal)
+                    worker_failed = exit_code != 0 and self.failures.flush_process_failures()
                     for proc in terminal:
                         message = f"Terminal service step {proc.name} exited with code {proc.exit_code}"
                         logger.info(message)
-                        if proc.exit_code:
+                        if proc.exit_code and not worker_failed:
                             cause = Cause(producer=proc.name, return_code=proc.exit_code)
                             self.failures.write(SrtFailure(FailureCode.BENCHMARK_FAILED, message, cause=cause))
                     if exit_code:

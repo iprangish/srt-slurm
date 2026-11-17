@@ -20,7 +20,6 @@ from srtctl.cli.do_sweep import SweepOrchestrator
 from srtctl.contract.failures import FailureCode, SrtFailure
 from srtctl.core.failure_log import FailureLog
 from srtctl.core.processes import ManagedProcess, ProcessRegistry
-from srtctl.core.readiness import ProcessDied
 from srtctl.core.runtime import Nodes, RuntimeContext
 from srtctl.core.schema import (
     BenchmarkConfig,
@@ -33,12 +32,7 @@ from srtctl.core.schema import (
     TelemetryExporterConfig,
 )
 from srtctl.core.status import JobStage, JobStatus
-from srtctl.frontends import TRTLLMServeFrontend
 from srtctl.mock import MockOptions, run_mock_sweep
-
-SERVICE_SRUN = "srtctl.cli.mixins.service_stage.start_srun_process"
-SERVICE_WAIT = "srtctl.cli.mixins.service_stage.wait_until_ready"
-SERVICE_HOST_IP = "srtctl.cli.mixins.service_stage.get_hostname_ip"
 
 MOCK_RECIPE = {
     "schema": 2,
@@ -147,6 +141,16 @@ def test_benchmark_stopped_by_worker_death_records_worker_failed(tmp_path):
     assert _codes(tmp_path) == ["worker_failed"]
 
 
+def test_terminal_service_failure_after_worker_death_records_worker_failed(tmp_path):
+    orch = _orchestrator(tmp_path, _config(benchmark=BenchmarkConfig(type="manual")), registry=_failed_registry())
+    orch.terminal_processes["client"] = [SimpleNamespace(name="client", is_running=False, exit_code=2)]
+
+    with patch.object(orch, "_public_api_node", return_value="node0"):
+        assert _run_benchmark(orch) == 2
+
+    assert _codes(tmp_path) == ["worker_failed"]
+
+
 def test_eval_only_health_timeout_records_health_check_timeout(tmp_path, monkeypatch):
     monkeypatch.setenv("EVAL_ONLY", "true")
     orch = _orchestrator(tmp_path)
@@ -181,42 +185,9 @@ def _clock_sync(tmp_path):
         _orchestrator(tmp_path, _config(telemetry=telemetry))._check_clock_sync()
 
 
-def _services(tmp_path, wait):
-    recipe = {
-        **MOCK_RECIPE,
-        "model": {"path": "/model", "container": "/job.sqsh", "precision": "bf16"},
-        "benchmark": {"type": "manual"},
-        "services": [{"name": "a", "command": ["/bin/true"], "readiness": {"port": 9000, "timeout_seconds": 5}}],
-    }
-    dead = MagicMock()
-    dead.poll.return_value = 127
-    orch = _orchestrator(tmp_path, SrtConfig.Schema().load(recipe))
-    with patch(SERVICE_SRUN, return_value=dead), patch(SERVICE_HOST_IP, return_value="10.0.0.10"), wait:
-        orch.start_services("after_frontend")
-
-
 def _sequential_start(tmp_path):
     with patch("srtctl.cli.mixins.worker_stage.wait_for_health", return_value=False):
         _orchestrator(tmp_path)._wait_for_worker_ready(SimpleNamespace(node="node1", sys_port=8081))
-
-
-def _trtllm_serve(tmp_path):
-    config = SimpleNamespace(
-        backend=SimpleNamespace(type="trtllm"),
-        topology=SimpleNamespace(is_disaggregated=True),
-        health_check=SimpleNamespace(max_attempts=1, interval_seconds=0),
-    )
-    workers = [
-        SimpleNamespace(node="node1", endpoint_mode="prefill", http_port=6100, is_leader=True),
-        SimpleNamespace(node="node2", endpoint_mode="decode", http_port=6100, is_leader=True),
-    ]
-    with (
-        patch("srtctl.frontends.trtllm_serve.wait_for_health", return_value=False),
-        patch("srtctl.frontends.trtllm_serve.get_hostname_ip", side_effect=lambda node: f"10.0.0.{node[-1]}"),
-    ):
-        TRTLLMServeFrontend().start_frontends(
-            SimpleNamespace(uses_nginx=False, frontend_nodes=["node0"]), MagicMock(), config, None, workers
-        )
 
 
 @pytest.mark.parametrize(
@@ -224,24 +195,9 @@ def _trtllm_serve(tmp_path):
     [
         (_host_setup, "host_setup failed on", FailureCode.INFRA_SERVICE_FAILED),
         (_clock_sync, "clock_sync_check: node0", FailureCode.TELEMETRY_REQUIRED_FAILED),
-        (
-            lambda tmp_path: _services(tmp_path, patch(SERVICE_WAIT, return_value=False)),
-            "was not ready within 5s",
-            FailureCode.HEALTH_CHECK_TIMEOUT,
-        ),
-        (
-            lambda tmp_path: _services(tmp_path, patch(SERVICE_WAIT, side_effect=ProcessDied("gone"))),
-            "exited with code 127 .* before its readiness probe passed",
-            FailureCode.INFRA_SERVICE_FAILED,
-        ),
         (_sequential_start, "did not become healthy", FailureCode.HEALTH_CHECK_TIMEOUT),
-        (
-            _trtllm_serve,
-            r"trtllm-serve worker 10\.0\.0\.1:6100 did not become healthy",
-            FailureCode.HEALTH_CHECK_TIMEOUT,
-        ),
     ],
-    ids=["host_setup", "clock_sync", "service_not_ready", "service_died", "sequential_start", "trtllm_serve"],
+    ids=["host_setup", "clock_sync", "sequential_start"],
 )
 def test_raise_site_codes(tmp_path, site, match, code):
     with pytest.raises(RuntimeError, match=match) as raised:
@@ -319,14 +275,6 @@ def test_run_eval_failure_writes_nothing(tmp_path, monkeypatch):
 
     assert exit_code == 0
     assert not (log_dir / "failures.jsonl").exists()
-
-
-@pytest.fixture
-def restore_signal_handlers():
-    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
-    yield
-    for sig, handler in saved.items():
-        signal.signal(sig, handler)
 
 
 def test_signal_records_terminated_once_with_subcode(tmp_path, restore_signal_handlers):

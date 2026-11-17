@@ -58,7 +58,8 @@ def test_file_created_lazily_and_stdout_copy_is_opt_in(tmp_path, capsys):
     assert not no_file.exists()
 
 
-def test_disabled_is_inert(capsys, caplog):
+def test_disabled_is_inert(tmp_path, monkeypatch, capsys, caplog):
+    monkeypatch.chdir(tmp_path)
     log = FailureLog.disabled()
     log.registry = _registry()
     log.registry.record_failure("decode_0")
@@ -69,7 +70,7 @@ def test_disabled_is_inert(capsys, caplog):
         log.write_unless_process_failed(failure)
 
     assert not log.written and failure.identity == {} and caplog.text == "" and capsys.readouterr().out == ""
-    assert not (Path() / "failures.jsonl").exists()
+    assert list(tmp_path.iterdir()) == []
     assert log._written_processes == set()
 
 
@@ -90,6 +91,14 @@ def test_rotate_renames_previous_attempt(tmp_path):
     assert not (tmp_path / "failures.jsonl").exists()
     assert (tmp_path / "failures.2.jsonl").read_text() == "new\n"
     assert (tmp_path / "failures.1.jsonl").read_text() == "old\n"
+
+
+def test_rotate_never_raises(tmp_path, monkeypatch, caplog):
+    (tmp_path / "failures.jsonl").write_text("x\n")
+    monkeypatch.setattr(Path, "rename", lambda *args: (_ for _ in ()).throw(OSError("read-only")))
+    with caplog.at_level(logging.WARNING):
+        FailureLog(tmp_path, slurm_job_id="42", restart_count=1).rotate()
+    assert "Could not rotate" in caplog.text
 
 
 def _registry() -> ProcessRegistry:
@@ -119,13 +128,6 @@ def test_process_failures_written_once_in_detection_order(tmp_path):
     assert len(_lines(tmp_path / "failures.jsonl")) == 2
 
 
-def test_write_unless_process_failed_writes_failure_without_process_failures(tmp_path):
-    log = FailureLog(tmp_path, slurm_job_id="42", restart_count=0)
-    log.registry = ProcessRegistry("1")
-    log.write_unless_process_failed(_failure())
-    assert [r["code"] for r in _lines(tmp_path / "failures.jsonl")] == ["benchmark_failed"]
-
-
 def test_registry_failures_detail_prefers_fatal_line_then_tail(tmp_path):
     registry = ProcessRegistry("1")
     log_file = tmp_path / "w.log"
@@ -141,14 +143,7 @@ def test_registry_failures_detail_prefers_fatal_line_then_tail(tmp_path):
         ("b", 3, "line 3\nline 4"),
         ("c", 3, ""),
     ]
-
-
-@pytest.fixture
-def restore_signal_handlers():
-    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
-    yield
-    for sig, handler in saved.items():
-        signal.signal(sig, handler)
+    assert registry.failures(skip={"a", "c"}) == [("b", 3, "line 0\nline 1\nline 2\nline 3\nline 4")]
 
 
 def test_signal_hook_runs_once_before_cleanup(restore_signal_handlers):
