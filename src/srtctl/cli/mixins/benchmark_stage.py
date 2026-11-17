@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, cast
 
 from srtctl.backends.base import WorkerMode
 from srtctl.backends.trtllm import TRTLLMBackend
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure
+from srtctl.core.failure_log import FailureLog
 from srtctl.core.fingerprint import format_identity_verification, verify_identity
 from srtctl.core.health import wait_for_model
 from srtctl.core.ip_utils import url_host
@@ -105,6 +107,7 @@ class BenchmarkStageMixin:
     runtime: "RuntimeContext"
     benchmark_child_reaped: bool | None = None
     benchmark_child_allows_window_mutation: bool | None = None
+    failures: FailureLog = FailureLog.disabled()
 
     @property
     def endpoints(self) -> list["Endpoint"]:
@@ -358,6 +361,13 @@ class BenchmarkStageMixin:
 
         if not self._wait_for_service_ready(stop_event):
             logger.error("Server did not become healthy")
+            self.failures.write_unless_process_failed(
+                SrtFailure(
+                    FailureCode.HEALTH_CHECK_TIMEOUT,
+                    "Server did not become healthy",
+                    cause=Cause(producer=self.config.frontend.type),
+                )
+            )
             if reporter:
                 stage = JobStage.FRONTEND if serve_only else JobStage.BENCHMARK
                 reporter.report(JobStatus.FAILED, stage, "Workers failed health check")
@@ -421,6 +431,14 @@ class BenchmarkStageMixin:
                     exit_code = max((proc.exit_code or 0) for proc in terminal)
                     for proc in terminal:
                         logger.info("Terminal service step %s exited with code %s", proc.name, proc.exit_code)
+                        if proc.exit_code:
+                            self.failures.write(
+                                SrtFailure(
+                                    FailureCode.BENCHMARK_FAILED,
+                                    f"Terminal service step {proc.name} exited with code {proc.exit_code}",
+                                    cause=Cause(producer=proc.name, return_code=proc.exit_code),
+                                )
+                            )
                     if exit_code:
                         logger.error("Terminal service(s) failed; job exit code %d", exit_code)
                     else:
@@ -428,6 +446,7 @@ class BenchmarkStageMixin:
                     return exit_code
                 if registry.check_failures():
                     logger.error("Worker failure detected while serving")
+                    self.failures.flush_process_failures()
                     return 1
                 time.sleep(MANUAL_POLL_SECONDS)
             # The process monitor ticks faster than this loop and sets stop_event
@@ -437,6 +456,7 @@ class BenchmarkStageMixin:
             # monitor's cleanup has SIGTERMed everything else too.
             if registry.has_failures:
                 logger.error("Worker failure detected while serving")
+                self.failures.flush_process_failures()
                 return 1
             return 0
 
@@ -487,6 +507,13 @@ class BenchmarkStageMixin:
 
         if exit_code != 0:
             logger.error("Benchmark failed with exit code %d", exit_code)
+            self.failures.write_unless_process_failed(
+                SrtFailure(
+                    FailureCode.BENCHMARK_FAILED,
+                    f"Benchmark failed with exit code {exit_code}",
+                    cause=Cause(producer="benchmark", return_code=exit_code),
+                )
+            )
         else:
             logger.info("Benchmark completed successfully")
 

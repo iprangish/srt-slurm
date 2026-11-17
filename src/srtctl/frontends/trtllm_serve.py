@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import yaml
 
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure
 from srtctl.core.health import WorkerHealthResult, probe_http_ok, wait_for_health
 from srtctl.core.slurm import get_hostname_ip, start_srun_process
 from srtctl.frontends.base import (
@@ -194,7 +195,11 @@ class TRTLLMServeFrontend(Frontend):
             ):
                 if stop_event is not None and stop_event.is_set():
                     raise RuntimeError("trtllm-serve worker wait aborted")
-                raise RuntimeError(f"trtllm-serve worker {url} did not become healthy")
+                raise SrtFailure(
+                    FailureCode.HEALTH_CHECK_TIMEOUT,
+                    f"trtllm-serve worker {url} did not become healthy",
+                    cause=Cause(producer=url),
+                )
 
         # Build ser.yaml (host path in log_dir, mounted to /logs in the container).
         ser = self._build_ser(config, prefill_urls, decode_urls, topology.frontend_port)

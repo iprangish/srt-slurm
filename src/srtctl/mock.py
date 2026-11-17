@@ -478,6 +478,7 @@ def run_mock_sweep(
     """
     from srtctl.cli.do_sweep import SweepOrchestrator
     from srtctl.core.config import load_config
+    from srtctl.core.failure_log import FailureLog
     from srtctl.core.runtime import RuntimeContext
 
     opts = options or MockOptions()
@@ -494,7 +495,9 @@ def run_mock_sweep(
         with mock_infrastructure(options=opts, output_dir=output_dir) as sink:
             config = load_config(config_path)
             runtime = RuntimeContext.from_config(config, job_id=job_id)
-            orchestrator = SweepOrchestrator(config=config, runtime=runtime)
+            failures = FailureLog(log_dir, slurm_job_id=job_id, restart_count=0)
+            failures.configure(config.reporting)
+            orchestrator = SweepOrchestrator(config=config, runtime=runtime, failures=failures)
 
             # Run the orchestrator in a thread so we can insert explicit phase
             # pauses from the outside (the orchestrator itself is synchronous

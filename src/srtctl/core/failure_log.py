@@ -11,6 +11,7 @@ from pathlib import Path
 from srtctl.contract.failures import Cause, FailureCode, SrtFailure
 from srtctl.core.launcher import get_launcher
 from srtctl.core.processes import ProcessRegistry
+from srtctl.core.schema import ReportingConfig, ReportingFailuresConfig
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,14 @@ class FailureLog:
         log_dir = (Path(output_dir) if output_dir else config_path.parent) / "logs"
         return cls(log_dir, slurm_job_id=job_id, restart_count=int(os.environ.get("SLURM_RESTART_COUNT", "0")))
 
+    def configure(self, reporting: ReportingConfig | None) -> None:
+        """Apply the recipe's ``reporting.failures`` toggles; defaults when unset."""
+        toggles = (reporting.failures if reporting else None) or ReportingFailuresConfig()
+        self._file, self._stdout = toggles.file, toggles.stdout
+
     def rotate(self) -> None:
         """Move a previous attempt's file to the next free ``failures.<N>.jsonl``."""
-        if not self._path.exists():
+        if not self._enabled or not self._path.exists():
             return
         n = 1
         while (rotated := self._path.with_name(f"failures.{n}.jsonl")).exists():

@@ -337,10 +337,10 @@ def test_process_monitor_failure_still_releases(
     captured: dict[str, Any] = {}
     real_setup = processes_module.setup_signal_handlers
 
-    def capture_setup(stop_event: threading.Event, registry: ProcessRegistry) -> None:
+    def capture_setup(stop_event: threading.Event, registry: ProcessRegistry, **kwargs: Any) -> None:
         captured["stop_event"] = stop_event
         captured["registry"] = registry
-        real_setup(stop_event, registry)
+        real_setup(stop_event, registry, **kwargs)
 
     def critical_failure(self: SweepOrchestrator) -> None:
         # The real monitor loop (not the MagicMock _run_sweep installs) sees a critical failure:

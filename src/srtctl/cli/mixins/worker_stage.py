@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from srtctl.backends.base import WorkerMode
 from srtctl.backends.vllm import VLLMBackend, VLLMFailoverConfig
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure
 from srtctl.core.fingerprint import generate_capture_script
 from srtctl.core.health import wait_for_health
 from srtctl.core.observability_nsys import wrap_observability_nsys
@@ -277,7 +278,9 @@ class WorkerStageMixin:
             None,
         )
         if master is None:
-            raise RuntimeError(f"DWDP {mode} worker found no rank-0 {mode} endpoint to rendezvous with")
+            raise SrtFailure(
+                FailureCode.WORKER_FAILED, f"DWDP {mode} worker found no rank-0 {mode} endpoint to rendezvous with"
+            )
         env_to_set[DWDP_MASTER_ADDR_ENV] = get_hostname_ip(master.node, self.runtime.network_interface)
 
     def _dwdp_preamble(self, backend: Any, process: "Process", env_to_set: dict[str, str]) -> str | None:
@@ -818,7 +821,11 @@ class WorkerStageMixin:
             max_attempts=health_cfg.max_attempts,
             interval=health_cfg.interval_seconds,
         ):
-            raise RuntimeError(f"Sequential node start: worker on {leader.node}:{port} did not become healthy")
+            raise SrtFailure(
+                FailureCode.HEALTH_CHECK_TIMEOUT,
+                f"Sequential node start: worker on {leader.node}:{port} did not become healthy",
+                cause=Cause(producer=f"{leader.node}:{port}"),
+            )
 
     def worker_endpoint_groups(self, processes: list["Process"] | None = None) -> dict[EndpointKey, list["Process"]]:
         """The physical processes of every restart unit, keyed by ``(mode, index, engine)``, in launch order.

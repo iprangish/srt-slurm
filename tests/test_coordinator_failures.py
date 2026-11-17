@@ -1,0 +1,357 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Failure records the in-job coordinator writes at its existing failure points."""
+
+import contextlib
+import json
+import signal
+import sys
+import threading
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+import yaml
+
+from srtctl.cli import do_sweep
+from srtctl.cli.do_sweep import SweepOrchestrator
+from srtctl.contract.failures import FailureCode, SrtFailure
+from srtctl.core.failure_log import FailureLog
+from srtctl.core.processes import ManagedProcess, ProcessRegistry
+from srtctl.core.readiness import ProcessDied
+from srtctl.core.runtime import Nodes, RuntimeContext
+from srtctl.core.schema import (
+    BenchmarkConfig,
+    HostSetupConfig,
+    ModelConfig,
+    ResourceConfig,
+    RoleConfig,
+    SrtConfig,
+    TelemetryConfig,
+    TelemetryExporterConfig,
+)
+from srtctl.core.status import JobStage, JobStatus
+from srtctl.frontends import TRTLLMServeFrontend
+from srtctl.mock import MockOptions, run_mock_sweep
+
+SERVICE_SRUN = "srtctl.cli.mixins.service_stage.start_srun_process"
+SERVICE_WAIT = "srtctl.cli.mixins.service_stage.wait_until_ready"
+SERVICE_HOST_IP = "srtctl.cli.mixins.service_stage.get_hostname_ip"
+
+MOCK_RECIPE = {
+    "schema": 2,
+    "name": "coordinator-failures",
+    "model": {"path": "hf:fake/mock-model", "container": "nvcr.io/fake:latest", "precision": "fp8"},
+    "resources": {"gpu_type": "h100", "gpus_per_node": 8},
+    "roles": {"agg": {"nodes": 1, "workers": 1}},
+    "benchmark": {"type": "custom", "command": "echo fake-benchmark"},
+}
+
+
+def _config(**fields) -> SrtConfig:
+    fields.setdefault("benchmark", BenchmarkConfig(type="custom", command="echo load", concurrencies=[1]))
+    return SrtConfig(
+        name="coordinator-failures",
+        model=ModelConfig(path="/models/test", container="test.sqsh", precision="fp8"),
+        resources=ResourceConfig(gpu_type="gb200", gpus_per_node=4),
+        roles={"prefill": RoleConfig(nodes=1), "decode": RoleConfig(nodes=1)},
+        **fields,
+    )
+
+
+def _runtime(tmp_path: Path) -> RuntimeContext:
+    return RuntimeContext(
+        job_id="12345",
+        run_name="test-run",
+        nodes=Nodes(head="node0", bench="node0", infra="node0", worker=("node1", "node2")),
+        head_node_ip="10.0.0.1",
+        infra_node_ip="10.0.0.1",
+        log_dir=tmp_path,
+        model_path=Path("/models/test"),
+        container_image=Path("/img.sqsh"),
+        gpus_per_node=4,
+        network_interface=None,
+        container_mounts={},
+        environment={},
+    )
+
+
+def _orchestrator(tmp_path: Path, config: SrtConfig | None = None, registry: ProcessRegistry | None = None):
+    failures = FailureLog(tmp_path, slurm_job_id="12345", restart_count=0)
+    failures.registry = registry or ProcessRegistry("12345")
+    return SweepOrchestrator(config=config or _config(), runtime=_runtime(tmp_path), failures=failures)
+
+
+def _failed_registry() -> ProcessRegistry:
+    registry = ProcessRegistry("12345")
+    registry.add_process(ManagedProcess(name="decode_0", popen=SimpleNamespace(pid=1, poll=lambda: 1), log_file=None))
+    registry.record_failure("decode_0")
+    return registry
+
+
+def _records(log_dir: Path) -> list[dict]:
+    path = log_dir / "failures.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _codes(log_dir: Path) -> list[str]:
+    return [record["code"] for record in _records(log_dir)]
+
+
+def _run_benchmark(orch: SweepOrchestrator, *, healthy: bool = True, script_exit: int = 0, reporter=None) -> int:
+    with (
+        patch.object(orch, "_wait_for_service_ready", return_value=healthy),
+        patch.object(orch, "start_tachometer", return_value=[]),
+        patch.object(orch, "_run_benchmark_script", return_value=script_exit),
+    ):
+        return orch.run_benchmark(orch.failures.registry, threading.Event(), reporter)
+
+
+def test_health_gate_timeout_records_health_check_timeout(tmp_path):
+    orch = _orchestrator(tmp_path)
+    reporter = MagicMock()
+
+    assert _run_benchmark(orch, healthy=False, reporter=reporter) == 1
+
+    (record,) = _records(tmp_path)
+    assert record["code"] == "health_check_timeout"
+    assert record["cause"] == {"producer": "dynamo"}
+    reporter.report.assert_called_once_with(JobStatus.FAILED, JobStage.BENCHMARK, "Workers failed health check")
+
+
+def test_worker_death_during_health_wait_records_worker_failed(tmp_path):
+    orch = _orchestrator(tmp_path, registry=_failed_registry())
+
+    assert _run_benchmark(orch, healthy=False) == 1
+
+    assert _codes(tmp_path) == ["worker_failed"]
+
+
+def test_benchmark_nonzero_records_benchmark_failed(tmp_path):
+    orch = _orchestrator(tmp_path)
+
+    assert _run_benchmark(orch, script_exit=7) == 7
+
+    (record,) = _records(tmp_path)
+    assert record["code"] == "benchmark_failed"
+    assert record["cause"] == {"producer": "benchmark", "return_code": 7}
+
+
+def test_benchmark_stopped_by_worker_death_records_worker_failed(tmp_path):
+    orch = _orchestrator(tmp_path, registry=_failed_registry())
+
+    assert _run_benchmark(orch, script_exit=1) == 1
+
+    assert _codes(tmp_path) == ["worker_failed"]
+
+
+def test_eval_only_health_timeout_records_health_check_timeout(tmp_path, monkeypatch):
+    monkeypatch.setenv("EVAL_ONLY", "true")
+    orch = _orchestrator(tmp_path)
+
+    with (
+        patch.object(orch, "_public_api_node", return_value="node0"),
+        patch.object(orch, "_wait_for_service_ready", return_value=False),
+    ):
+        assert orch._run_post_eval(threading.Event()) == 1
+
+    assert _codes(tmp_path) == ["health_check_timeout"]
+
+
+def _srun_exits(returncode: int):
+    proc = MagicMock()
+    proc.wait.return_value = returncode
+    proc.returncode = returncode
+    proc.poll.return_value = None
+    return patch("srtctl.cli.do_sweep.start_srun_process", return_value=proc)
+
+
+def _host_setup(tmp_path):
+    orch = _orchestrator(tmp_path, _config(host_setup=HostSetupConfig(commands=["true"])))
+    with _srun_exits(1):
+        orch._run_host_setup()
+
+
+def _clock_sync(tmp_path):
+    exporter = TelemetryExporterConfig(container_image="dcgm-exporter", port=9401)
+    telemetry = TelemetryConfig(enabled=True, dcgm_exporter=exporter, required=True)
+    with _srun_exits(1):
+        _orchestrator(tmp_path, _config(telemetry=telemetry))._check_clock_sync()
+
+
+def _services(tmp_path, wait):
+    recipe = {
+        **MOCK_RECIPE,
+        "model": {"path": "/model", "container": "/job.sqsh", "precision": "bf16"},
+        "benchmark": {"type": "manual"},
+        "services": [{"name": "a", "command": ["/bin/true"], "readiness": {"port": 9000, "timeout_seconds": 5}}],
+    }
+    dead = MagicMock()
+    dead.poll.return_value = 127
+    orch = _orchestrator(tmp_path, SrtConfig.Schema().load(recipe))
+    with patch(SERVICE_SRUN, return_value=dead), patch(SERVICE_HOST_IP, return_value="10.0.0.10"), wait:
+        orch.start_services("after_frontend")
+
+
+def _sequential_start(tmp_path):
+    with patch("srtctl.cli.mixins.worker_stage.wait_for_health", return_value=False):
+        _orchestrator(tmp_path)._wait_for_worker_ready(SimpleNamespace(node="node1", sys_port=8081))
+
+
+def _trtllm_serve(tmp_path):
+    config = SimpleNamespace(
+        backend=SimpleNamespace(type="trtllm"),
+        topology=SimpleNamespace(is_disaggregated=True),
+        health_check=SimpleNamespace(max_attempts=1, interval_seconds=0),
+    )
+    workers = [
+        SimpleNamespace(node="node1", endpoint_mode="prefill", http_port=6100, is_leader=True),
+        SimpleNamespace(node="node2", endpoint_mode="decode", http_port=6100, is_leader=True),
+    ]
+    with (
+        patch("srtctl.frontends.trtllm_serve.wait_for_health", return_value=False),
+        patch("srtctl.frontends.trtllm_serve.get_hostname_ip", side_effect=lambda node: f"10.0.0.{node[-1]}"),
+    ):
+        TRTLLMServeFrontend().start_frontends(
+            SimpleNamespace(uses_nginx=False, frontend_nodes=["node0"]), MagicMock(), config, None, workers
+        )
+
+
+@pytest.mark.parametrize(
+    ("site", "match", "code"),
+    [
+        (_host_setup, "host_setup failed on", FailureCode.INFRA_SERVICE_FAILED),
+        (_clock_sync, "clock_sync_check: node0", FailureCode.TELEMETRY_REQUIRED_FAILED),
+        (
+            lambda tmp_path: _services(tmp_path, patch(SERVICE_WAIT, return_value=False)),
+            "was not ready within 5s",
+            FailureCode.HEALTH_CHECK_TIMEOUT,
+        ),
+        (
+            lambda tmp_path: _services(tmp_path, patch(SERVICE_WAIT, side_effect=ProcessDied("gone"))),
+            "exited with code 127 .* before its readiness probe passed",
+            FailureCode.INFRA_SERVICE_FAILED,
+        ),
+        (_sequential_start, "did not become healthy", FailureCode.HEALTH_CHECK_TIMEOUT),
+        (
+            _trtllm_serve,
+            r"trtllm-serve worker 10\.0\.0\.1:6100 did not become healthy",
+            FailureCode.HEALTH_CHECK_TIMEOUT,
+        ),
+    ],
+    ids=["host_setup", "clock_sync", "service_not_ready", "service_died", "sequential_start", "trtllm_serve"],
+)
+def test_raise_site_codes(tmp_path, site, match, code):
+    with pytest.raises(RuntimeError, match=match) as raised:
+        site(tmp_path)
+
+    assert isinstance(raised.value, SrtFailure)
+    assert raised.value.code is code
+
+
+def _mock_sweep(tmp_path: Path) -> tuple[int, Path]:
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(yaml.dump(MOCK_RECIPE))
+    output_dir = tmp_path / "outputs" / "4242"
+    exit_code = run_mock_sweep(
+        config_path=recipe,
+        output_dir=output_dir,
+        job_id="4242",
+        options=MockOptions(child_duration_s=0.05, phase_pause_s=0.01),
+    )
+    return exit_code, output_dir / "logs"
+
+
+def test_finalizer_flip_records_telemetry_required_failed(tmp_path):
+    with patch.object(SweepOrchestrator, "finalize_power_telemetry", return_value=1):
+        exit_code, log_dir = _mock_sweep(tmp_path)
+
+    assert exit_code == 1
+    assert _codes(log_dir) == ["telemetry_required_failed"]
+
+
+def test_required_power_startup_records_telemetry_required_failed(tmp_path):
+    with patch.object(SweepOrchestrator, "power_telemetry_blocks_benchmark", return_value=True):
+        exit_code, log_dir = _mock_sweep(tmp_path)
+
+    assert exit_code == 1
+    assert _codes(log_dir) == ["telemetry_required_failed"]
+
+
+def test_unclassified_nonzero_exit_records_unknown(tmp_path):
+    with patch.object(SweepOrchestrator, "run_benchmark", return_value=3):
+        exit_code, log_dir = _mock_sweep(tmp_path)
+
+    assert exit_code == 3
+    (record,) = _records(log_dir)
+    assert (record["code"], record["error"]) == ("unknown", "Sweep failed with exit code 3")
+
+
+def test_successful_run_writes_nothing(tmp_path):
+    exit_code, log_dir = _mock_sweep(tmp_path)
+
+    assert exit_code == 0
+    assert not (log_dir / "failures.jsonl").exists()
+
+
+def test_run_eval_failure_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv("RUN_EVAL", "true")
+    with patch.object(SweepOrchestrator, "_run_post_eval", return_value=1):
+        exit_code, log_dir = _mock_sweep(tmp_path)
+
+    assert exit_code == 0
+    assert not (log_dir / "failures.jsonl").exists()
+
+
+@pytest.fixture
+def restore_signal_handlers():
+    saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    yield
+    for sig, handler in saved.items():
+        signal.signal(sig, handler)
+
+
+def test_signal_records_terminated_once_with_subcode(tmp_path, restore_signal_handlers):
+    def two_signals(self):
+        with contextlib.suppress(SystemExit):
+            signal.raise_signal(signal.SIGTERM)
+        signal.raise_signal(signal.SIGINT)
+
+    with patch.object(SweepOrchestrator, "_print_connection_info", two_signals), pytest.raises(SystemExit):
+        _mock_sweep(tmp_path)
+
+    (record,) = _records(tmp_path / "outputs" / "4242" / "logs")
+    assert (record["code"], record["subcode"], record["error"]) == ("terminated", "SIGTERM", "Received SIGTERM")
+    assert "cause" not in record
+
+
+def _main(tmp_path: Path, monkeypatch, config_path: Path) -> Path:
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    (log_dir / "failures.jsonl").write_text("previous attempt\n")
+    monkeypatch.setenv("SLURM_JOB_ID", "777")
+    monkeypatch.setenv("SRTCTL_OUTPUT_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "argv", ["do_sweep", str(config_path)])
+    with patch.object(do_sweep, "setup_logging"), pytest.raises(SystemExit) as exited:
+        do_sweep.main()
+    assert exited.value.code == 1
+    assert (log_dir / "failures.1.jsonl").read_text() == "previous attempt\n"
+    return log_dir
+
+
+def test_early_exit_missing_config_rotates_then_records(tmp_path, monkeypatch):
+    log_dir = _main(tmp_path, monkeypatch, tmp_path / "missing.yaml")
+
+    (record,) = _records(log_dir)
+    assert (record["code"], record["slurm_job_id"]) == ("job_preparation_failed", "777")
+
+
+def test_early_exit_load_failure_records_recipe_invalid(tmp_path, monkeypatch):
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text("name: incomplete\n")
+
+    log_dir = _main(tmp_path, monkeypatch, recipe)
+
+    assert _codes(log_dir) == ["recipe_invalid"]

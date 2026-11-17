@@ -22,7 +22,7 @@ import sys
 import textwrap
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from srtctl.backends.base import WorkerMode
@@ -35,7 +35,9 @@ from srtctl.cli.mixins import (
     TelemetryStageMixin,
     WorkerStageMixin,
 )
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure, as_failure
 from srtctl.core.config import load_config
+from srtctl.core.failure_log import FailureLog
 from srtctl.core.health import wait_for_port
 from srtctl.core.launcher import get_launcher
 from srtctl.core.lockfile import write_lockfile
@@ -109,6 +111,7 @@ class SweepOrchestrator(
     config: SrtConfig
     runtime: RuntimeContext
     serve_only: bool = False
+    failures: FailureLog = field(default_factory=FailureLog.disabled)
 
     @property
     def backend(self):
@@ -356,7 +359,11 @@ class SweepOrchestrator(
         if setup.ignore_failure:
             logger.warning("host_setup failed on %s (ignore_failure: true, continuing)", ", ".join(failures))
             return
-        raise RuntimeError(f"host_setup failed on: {', '.join(failures)}")
+        raise SrtFailure(
+            FailureCode.INFRA_SERVICE_FAILED,
+            f"host_setup failed on: {', '.join(failures)}",
+            cause=Cause(producer="host_setup"),
+        )
 
     # One probe per branch; the first that proves synchronisation prints its
     # evidence and wins, so clock_sync_<node>.out records *which* source
@@ -512,7 +519,7 @@ class SweepOrchestrator(
             "power sample and measurement-window timestamps would not be comparable"
         )
         if telemetry.required:
-            raise RuntimeError(message)
+            raise SrtFailure(FailureCode.TELEMETRY_REQUIRED_FAILED, message, cause=Cause(producer="clock_sync_check"))
         self._clock_sync_failures = failures
         logger.warning("%s (telemetry.required is false; continuing, artifacts will be marked unpublishable)", message)
 
@@ -568,7 +575,11 @@ class SweepOrchestrator(
             if proc.wait() != 0:
                 failures.append((node, log))
         if failures:
-            raise RuntimeError("Model staging failed on: " + ", ".join(f"{n} (see {log})" for n, log in failures))
+            raise SrtFailure(
+                FailureCode.INFRA_SERVICE_FAILED,
+                "Model staging failed on: " + ", ".join(f"{n} (see {log})" for n, log in failures),
+                cause=Cause(producer="stage_model"),
+            )
         logger.info("Model staging complete on %d node(s)", len(worker_nodes))
 
     def _ensure_model_cached(self) -> None:
@@ -711,6 +722,13 @@ class SweepOrchestrator(
             logger.info("EVAL_ONLY: Waiting for server health before eval...")
             if not self._wait_for_service_ready(stop_event):
                 logger.error("Server did not become healthy for eval")
+                self.failures.write_unless_process_failed(
+                    SrtFailure(
+                        FailureCode.HEALTH_CHECK_TIMEOUT,
+                        "Server did not become healthy for eval",
+                        cause=Cause(producer=self.config.frontend.type),
+                    )
+                )
                 return 1
         else:
             if not wait_for_port(eval_node, FRONTEND_PUBLIC_PORT, timeout=30):
@@ -793,6 +811,11 @@ class SweepOrchestrator(
 
         return proc.returncode or 0
 
+    def _record_signal(self, sig: str) -> None:
+        """Record the shutdown signal after any process failure that preceded it."""
+        self.failures.flush_process_failures()
+        self.failures.write(SrtFailure(FailureCode.TERMINATED, f"Received {sig}", subcode=sig))
+
     def run(self) -> int:
         """Run the complete sweep."""
         logger.info("Sweep Orchestrator")
@@ -818,7 +841,8 @@ class SweepOrchestrator(
 
         registry = ProcessRegistry(job_id=self.runtime.job_id)
         stop_event = threading.Event()
-        setup_signal_handlers(stop_event, registry)
+        self.failures.registry = registry
+        setup_signal_handlers(stop_event, registry, on_signal=self._record_signal)
         # The supervisor relaunches workers whose role has a restart policy; it
         # runs inside the monitor tick, ahead of the critical-failure check.
         supervisor = self.build_worker_supervisor(registry, stop_event)
@@ -918,11 +942,22 @@ class SweepOrchestrator(
                 exit_code = self._run_post_eval(stop_event)
                 if exit_code != 0:
                     logger.error("Eval-only evaluation failed with exit code %d", exit_code)
+                    if not self.failures.written:
+                        self.failures.write_unless_process_failed(
+                            SrtFailure(
+                                FailureCode.BENCHMARK_FAILED,
+                                f"Eval-only evaluation failed with exit code {exit_code}",
+                                cause=Cause(producer="eval", return_code=exit_code),
+                            )
+                        )
                 else:
                     logger.info("Eval-only evaluation completed successfully")
             elif self.power_telemetry_blocks_benchmark():
                 logger.error("Required power telemetry failed startup - skipping the formal benchmark")
                 reporter.report(JobStatus.FAILED, JobStage.BENCHMARK, "Required power telemetry failed startup")
+                self.failures.write(
+                    SrtFailure(FailureCode.TELEMETRY_REQUIRED_FAILED, "Required power telemetry failed startup")
+                )
                 exit_code = 1
             else:
                 # Stage 4: Benchmark (status reported AFTER health check passes)
@@ -941,16 +976,26 @@ class SweepOrchestrator(
         except Exception as e:
             logger.exception("Error during sweep")
             reporter.report(JobStatus.FAILED, JobStage.CLEANUP, str(e))
+            self.failures.write_unless_process_failed(as_failure(e))
             exit_code = 1
 
         finally:
             logger.info("Cleanup")
             # NOTE: finalize before registry.cleanup() so samples and manifest are durable.
+            run_exit_code = exit_code
             exit_code = self.finalize_power_telemetry(exit_code, interrupted=stop_event.is_set())
             exit_code = self.finalize_cpu_power_telemetry(exit_code, interrupted=stop_event.is_set())
             exit_code = self.finalize_cpu_power_host_telemetry(exit_code, interrupted=stop_event.is_set())
+            if run_exit_code == 0 and exit_code != 0:
+                self.failures.write(
+                    SrtFailure(FailureCode.TELEMETRY_REQUIRED_FAILED, "Required telemetry failed after the run")
+                )
             stop_event.set()
             registry.cleanup()
+            if exit_code != 0 and not self.failures.written:
+                self.failures.write_unless_process_failed(
+                    SrtFailure(FailureCode.UNKNOWN, f"Sweep failed with exit code {exit_code}")
+                )
             # After cleanup so the GPUs are idle before node state is reverted.
             self._run_host_teardown()
             if exit_code != 0:
@@ -998,11 +1043,19 @@ def main():
 
     try:
         config_path = Path(args.config)
+        failures = FailureLog.from_env(config_path) or FailureLog.disabled()
+        failures.rotate()
         if not config_path.exists():
             logger.error("Config file not found: %s", config_path)
+            failures.write(SrtFailure(FailureCode.JOB_PREPARATION_FAILED, f"Config file not found: {config_path}"))
             sys.exit(1)
 
-        config = load_config(config_path)
+        try:
+            config = load_config(config_path)
+        except Exception as e:
+            failures.write(SrtFailure(FailureCode.RECIPE_INVALID, str(e)))
+            raise
+        failures.configure(config.reporting)
 
         # Check for setup_script override from CLI (passed via env var)
         setup_script_override = os.environ.get("SRTCTL_SETUP_SCRIPT")
@@ -1018,7 +1071,7 @@ def main():
         # Type narrowing: job_id is str after the check above
         assert job_id is not None
         runtime = RuntimeContext.from_config(config, job_id)
-        orchestrator = SweepOrchestrator(config=config, runtime=runtime, serve_only=args.serve_only)
+        orchestrator = SweepOrchestrator(config=config, runtime=runtime, serve_only=args.serve_only, failures=failures)
         exit_code = orchestrator.run()
 
         sys.exit(exit_code)

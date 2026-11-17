@@ -484,6 +484,23 @@ def test_mock_sweep_postprocesses_and_propagates_exit_code(tmp_path: Path, bench
     assert not list((output_dir / "logs").glob("perf_dashboard*"))
 
 
+def test_mock_sweep_writes_failure_file_on_benchmark_failure(tmp_path: Path) -> None:
+    cfg = _write_config(tmp_path)
+    output_dir = tmp_path / "outputs" / "42047"
+
+    with patch.object(SweepOrchestrator, "_run_benchmark_script", return_value=7):
+        exit_code = run_mock_sweep(
+            config_path=cfg,
+            output_dir=output_dir,
+            job_id="42047",
+            options=MockOptions(child_duration_s=0.05, phase_pause_s=0.01),
+        )
+
+    assert exit_code == 7
+    first = json.loads((output_dir / "logs" / "failures.jsonl").read_text().splitlines()[0])
+    assert first["code"] == "benchmark_failed"
+
+
 def test_run_mock_sweep_drives_full_status_timeline(tmp_path: Path) -> None:
     cfg = _write_config(tmp_path)
     output_dir = tmp_path / "outputs" / "42043"

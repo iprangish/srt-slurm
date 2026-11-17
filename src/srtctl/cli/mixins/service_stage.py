@@ -42,6 +42,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure
 from srtctl.core.processes import ManagedProcess, ProcessRegistry, terminate_and_reap
 from srtctl.core.readiness import ProcessDied, wait_until_ready
 from srtctl.core.slurm import get_hostname_ip, start_srun_process
@@ -211,9 +212,17 @@ class ServiceStageMixin:
             returncode = step.popen.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             terminate_and_reap(step.popen)
-            raise RuntimeError(f"{what} timed out after {int(timeout)}s and was killed; see {log}") from None
+            raise SrtFailure(
+                FailureCode.INFRA_SERVICE_FAILED,
+                f"{what} timed out after {int(timeout)}s and was killed; see {log}",
+                cause=Cause(producer=step.name),
+            ) from None
         if returncode != 0:
-            raise RuntimeError(f"{what} failed (exit {returncode}); see {log}")
+            raise SrtFailure(
+                FailureCode.INFRA_SERVICE_FAILED,
+                f"{what} failed (exit {returncode}); see {log}",
+                cause=Cause(producer=step.name, return_code=returncode),
+            )
 
     def _service_container(self, service: ServiceConfig) -> str:
         kind = get_service_kind(service.type)
@@ -403,14 +412,18 @@ class ServiceStageMixin:
                 is_alive=lambda: proc.is_running,
             )
         except ProcessDied:
-            raise RuntimeError(
+            raise SrtFailure(
+                FailureCode.INFRA_SERVICE_FAILED,
                 f"services[{service.name}] exited with code {proc.exit_code} on {proc.node} before its readiness "
-                f"probe passed ({readiness.describe()}); see {proc.log_file}"
+                f"probe passed ({readiness.describe()}); see {proc.log_file}",
+                cause=Cause(producer=service.name, return_code=proc.exit_code),
             ) from None
         if not ready:
-            raise RuntimeError(
+            raise SrtFailure(
+                FailureCode.HEALTH_CHECK_TIMEOUT,
                 f"services[{service.name}] on {proc.node} was not ready within {readiness.timeout_seconds}s "
-                f"({readiness.describe()}); see {proc.log_file}"
+                f"({readiness.describe()}); see {proc.log_file}",
+                cause=Cause(producer=service.name),
             )
 
     def _wait_service_ready(self, proc: ManagedProcess, service: ServiceConfig, ctx: ServiceLaunchContext) -> None:
