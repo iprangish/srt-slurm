@@ -618,7 +618,7 @@ For failures inside the running job, see [Failure Records](failure-records.md).
 | `0` | Every submission succeeded (or there was nothing to submit). |
 | `1` | A failure with no accepted job. |
 | `2` | Invalid invocation (a command-line error, a bad `--set`, an unsupported flag combination or a missing recipe). |
-| `3` | Partial: at least one job was accepted and at least one failure was reported. |
+| `3` | At least one job was accepted and at least one failure was reported. Accepted jobs may be queued or running; the `accepted` records list them. |
 
 `--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed, and a file that cannot be written only prints a warning to stderr. Errors raised by argument parsing itself (unknown flag, missing `-f`) happen before the path is known, so under `--json` they are reported only on stdout.
 
