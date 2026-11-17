@@ -424,6 +424,15 @@ def test_unlisted_or_communication_error_is_submission_failed(stderr):
     assert excinfo.value.message == "sbatch failed"
 
 
+@pytest.mark.parametrize(
+    "stdout",
+    ["Submitted batch job 42\n", "Submitted batch job 42 on cluster west\n", "42\n", "42;west\n"],
+)
+def test_sbatch_job_id_from_every_output_format(stdout):
+    with patch("subprocess.run", return_value=MagicMock(stdout=stdout, stderr="")):
+        assert SlurmLauncher().submit(Path("job.sh")) == "42"
+
+
 def test_sbatch_without_job_id_is_submission_failed_with_stdout():
     result = MagicMock(stdout="weird", stderr="")
     with patch("subprocess.run", return_value=result), pytest.raises(SrtFailure) as excinfo:

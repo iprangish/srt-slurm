@@ -40,43 +40,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LAUNCHER = "slurm"
 
-_SBATCH_REFUSAL_PREFIX = "sbatch: error: Batch job submission failed: "
-# Slurm error constant -> message; slurm_errno.c, Slurm 23.02 through master.
-SBATCH_REFUSALS: dict[str, str] = {
-    "ESLURM_INVALID_TIME_LIMIT": "Requested time limit is invalid (missing or exceeds some limit)",
-    "ESLURM_INVALID_ACCOUNT": "Invalid account or account/partition combination specified",
-    "ESLURM_INVALID_PARTITION_NAME": "Invalid partition name specified",
-    "ESLURM_REQUESTED_NODE_CONFIG_UNAVAILABLE": "Requested node configuration is not available",
-    "ESLURM_INVALID_QOS": "Invalid qos specification",
-    "ESLURM_ACCOUNTING_POLICY": "Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)",
-    "ESLURM_INVALID_GRES": "Invalid generic resource (gres) specification",
-    "ESLURM_INVALID_NODE_COUNT": "Node count specification invalid",
-    "ESLURM_INVALID_FEATURE": "Invalid feature specification",
-    "ESLURM_PARTITION_NOT_AVAIL": "Required partition not available (inactive or drain)",
-    "ESLURM_INVALID_LICENSES": "Invalid license specification",
-}
-
-
-def sbatch_failure(returncode: int | None, stdout: str, stderr: str) -> SrtFailure:
-    """Classify a failed sbatch call: a listed controller refusal is ``sbatch_rejected``, anything else is not."""
-    stderr = stderr.strip()
-    cause = Cause(producer="sbatch", return_code=returncode, message=stderr or stdout.strip() or None)
-    refused = {
-        line.removeprefix(_SBATCH_REFUSAL_PREFIX)
-        for line in stderr.splitlines()
-        if line.startswith(_SBATCH_REFUSAL_PREFIX)
-    }
-    for subcode, text in SBATCH_REFUSALS.items():
-        if text in refused:
-            return SrtFailure(FailureCode.SBATCH_REJECTED, "Slurm rejected the job", subcode=subcode, cause=cause)
-    if returncode is None:
-        message = "Could not run sbatch"
-    elif returncode == 0:
-        message = "sbatch did not report a job id"
-    else:
-        message = "sbatch failed"
-    return SrtFailure(FailureCode.SUBMISSION_FAILED, message, cause=cause)
-
 
 @dataclass(frozen=True)
 class LaunchSpec:
@@ -436,7 +399,7 @@ class SlurmLauncher(Launcher):
             raise sbatch_failure(exc.returncode, exc.stdout or "", exc.stderr or "") from exc
         except OSError as exc:
             raise sbatch_failure(None, "", str(exc)) from exc
-        match = re.search(r"Submitted batch job (\d+)", result.stdout)
+        match = _SBATCH_JOB_ID.search(result.stdout)
         if match is None:
             raise sbatch_failure(0, result.stdout, result.stderr)
         return match.group(1)
@@ -477,3 +440,43 @@ def get_launcher() -> Launcher:
     if name not in launchers():
         raise ValueError(f"srtslurm.yaml launcher: {name!r} is not one of {', '.join(sorted(launchers()))}")
     return _launcher(name)
+
+
+# sbatch.c prints `Submitted batch job <id>[ on cluster <name>]`, or `<id>[;<name>]` with --parsable.
+_SBATCH_JOB_ID = re.compile(r"^(?:Submitted batch job )?(\d+)(?: on cluster \S+|;\S+)?$", re.MULTILINE)
+_SBATCH_REFUSAL_PREFIX = "sbatch: error: Batch job submission failed: "
+# Slurm error constant -> message; slurm_errno.c, Slurm 23.02 through master.
+SBATCH_REFUSALS: dict[str, str] = {
+    "ESLURM_INVALID_TIME_LIMIT": "Requested time limit is invalid (missing or exceeds some limit)",
+    "ESLURM_INVALID_ACCOUNT": "Invalid account or account/partition combination specified",
+    "ESLURM_INVALID_PARTITION_NAME": "Invalid partition name specified",
+    "ESLURM_REQUESTED_NODE_CONFIG_UNAVAILABLE": "Requested node configuration is not available",
+    "ESLURM_INVALID_QOS": "Invalid qos specification",
+    "ESLURM_ACCOUNTING_POLICY": "Job violates accounting/QOS policy (job submit limit, user's size and/or time limits)",
+    "ESLURM_INVALID_GRES": "Invalid generic resource (gres) specification",
+    "ESLURM_INVALID_NODE_COUNT": "Node count specification invalid",
+    "ESLURM_INVALID_FEATURE": "Invalid feature specification",
+    "ESLURM_PARTITION_NOT_AVAIL": "Required partition not available (inactive or drain)",
+    "ESLURM_INVALID_LICENSES": "Invalid license specification",
+}
+
+
+def sbatch_failure(returncode: int | None, stdout: str, stderr: str) -> SrtFailure:
+    """Classify a failed sbatch call: a listed controller refusal is ``sbatch_rejected``, anything else is not."""
+    stderr = stderr.strip()
+    cause = Cause(producer="sbatch", return_code=returncode, message=stderr or stdout.strip() or None)
+    refused = {
+        line.removeprefix(_SBATCH_REFUSAL_PREFIX)
+        for line in stderr.splitlines()
+        if line.startswith(_SBATCH_REFUSAL_PREFIX)
+    }
+    for subcode, text in SBATCH_REFUSALS.items():
+        if text in refused:
+            return SrtFailure(FailureCode.SBATCH_REJECTED, "Slurm rejected the job", subcode=subcode, cause=cause)
+    if returncode is None:
+        message = "Could not run sbatch"
+    elif returncode == 0:
+        message = "sbatch did not report a job id"
+    else:
+        message = "sbatch failed"
+    return SrtFailure(FailureCode.SUBMISSION_FAILED, message, cause=cause)
