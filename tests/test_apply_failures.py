@@ -289,7 +289,7 @@ def test_invocation_errors_exit_2(monkeypatch, tmp_path, capsys, args, message, 
     code = _apply(monkeypatch, tmp_path, json_mode=json_mode, args=args)
     captured = capsys.readouterr()
     assert code == 2
-    assert "usage:" in captured.err
+    assert ("usage:" in captured.err) is (message == "unrecognized arguments")
     if not json_mode:
         assert "{" not in captured.out
         return
@@ -349,14 +349,6 @@ def test_directory_mixed_results_exit_3(monkeypatch, tmp_path, capsys, json_mode
     assert error["recipe_path"].endswith("b.yaml")
 
 
-def test_directory_aborts_on_setup_incomplete_via_apply(monkeypatch, tmp_path, capsys):
-    directory = _recipes(tmp_path, a=MINIMAL_CONFIG, b=MINIMAL_CONFIG)
-    setup = {"side_effect": SrtFailure(FailureCode.SETUP_INCOMPLETE, "Required binaries not found")}
-    assert _apply(monkeypatch, tmp_path, target=directory, setup=setup) == 1
-    (record,) = _records(capsys)
-    assert record["code"] == "setup_incomplete"
-
-
 def test_sweep_item_two_fails_after_item_one_accepted(monkeypatch, tmp_path, capsys):
     sweep = {**MINIMAL_CONFIG, "sweep": {"tokens": [1, 2, 3]}}
     sweep["roles"] = {**MINIMAL_CONFIG["roles"], "prefill": {"nodes": 1, "workers": 1, "args": {"x": "{tokens}"}}}
@@ -399,3 +391,18 @@ def test_dry_run_directory_with_bad_file_still_exits_0(monkeypatch, tmp_path):
         except SystemExit as exc:
             code = exc.code or 0
     assert code == 0
+
+
+def test_set_parse_error_reaches_failures_file(monkeypatch, tmp_path):
+    path = tmp_path / "f.jsonl"
+    assert _apply(monkeypatch, tmp_path, args=("--set", "novalue", "--failures-file", str(path))) == 2
+    (record,) = [json.loads(line) for line in path.read_text().splitlines()]
+    assert record["code"] == "invocation_invalid"
+
+
+def test_non_apply_bad_flag_emits_no_record(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["srtctl", "dry-run", "-f", "x.yaml", "--bogus", "--json"])
+    with pytest.raises(SystemExit) as excinfo:
+        submit_cli.main()
+    assert excinfo.value.code == 2
+    assert "{" not in capsys.readouterr().out

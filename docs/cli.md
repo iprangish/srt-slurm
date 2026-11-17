@@ -579,7 +579,7 @@ The MCP server (`srtctl-mcp`, stdio by default, `SRTCTL_MCP_TRANSPORT=streamable
 
 Without `--json` the same facts are printed as prose, one line per failure (`Error [code]: message`), so the information shown and the exit code never depend on the flag.
 
-When one invocation produces several submissions (a directory, a sweep, an override file), each record carries `submission_index` (1-based) and the identity of its submission: `recipe_path` for a file, `parameters` for a sweep point, `variant` for an override variant. A failing submission does not stop the others, except that an incomplete srtctl setup (`setup_incomplete`) aborts a directory run.
+Every record about a submission carries `submission_index` (1-based) and its identity: `recipe_path` for a file, `parameters` for a sweep point, `variant` for an override variant. A directory run continues past a failing file, except that `setup_incomplete` aborts it; a sweep or an override file stops at its first failing submission.
 
 ### Failure records
 
@@ -604,7 +604,7 @@ Values that were not observed are omitted, never `null`.
 | `preflight_failed` | Pre-submit checks of model, container or telemetry paths failed. |
 | `sbatch_rejected` | `sbatch` refused the job; `subcode` names the Slurm error when recognised. |
 | `submission_failed` | Submission failed for another reason. |
-| `job_preparation_failed` | The job was accepted but copying its recipe into the output directory failed. |
+| `job_preparation_failed` | The job was accepted but preparing its output directory failed. |
 | `sbatch_archive_failed` | The job was accepted but archiving its sbatch script failed. |
 | `metadata_write_failed` | The job was accepted but writing its metadata file failed. |
 | `unknown` | Any failure not classified above. |
@@ -615,10 +615,10 @@ Values that were not observed are omitted, never `null`.
 | --- | --- |
 | `0` | Every submission succeeded (or there was nothing to submit). |
 | `1` | A failure with no accepted job. |
-| `2` | Invalid invocation. Argparse's usage text is still printed to stderr. |
+| `2` | Invalid invocation. The usage text is still printed to stderr. |
 | `3` | Partial: at least one job was accepted and at least one failure was reported. |
 
-`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed.
+`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed. Errors raised by argument parsing itself (unknown flag, missing `-f`) happen before the path is known, so under `--json` they are reported only on stdout.
 
 ### Reading the output as a client
 

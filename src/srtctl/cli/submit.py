@@ -1884,8 +1884,7 @@ def materialize_config_path(config_path: Path, overrides: Sequence[Any] = (), *,
     if not payload.strip():
         if from_stdin:
             raise InvocationError("No YAML received on stdin")
-        with _report.phase(FailureCode.RECIPE_INVALID, ValueError):
-            raise ValueError(f"{config_path} is empty")
+        raise SrtFailure(FailureCode.RECIPE_INVALID, f"{config_path} is empty")
 
     changed = from_stdin
     if overrides or pin_sources:
@@ -2612,8 +2611,8 @@ def _report_usage_errors():
         with contextlib.redirect_stderr(captured):
             yield
     except SystemExit as exc:
-        if exc.code == 2 and "apply" in sys.argv and "--json" in sys.argv:
-            message = captured.getvalue().strip().rsplit("error: ", 1)[-1]
+        if exc.code == 2 and sys.argv[1:2] == ["apply"] and "--json" in sys.argv:
+            message = captured.getvalue().strip().split(": error: ", 1)[-1]
             ApplyReport(active=True, json_out=sys.stdout).fail(InvocationError(message))
         raise
     finally:
@@ -2632,18 +2631,6 @@ def _run():
     parser = build_parser()
     with _report_usage_errors():
         args = parser.parse_args()
-        mock_mode = bool(getattr(args, "mock_mode", False))
-        serve_only = bool(getattr(args, "serve_only", False))
-        if serve_only and mock_mode:
-            parser.error("--serve-only cannot be combined with --mock")
-        if serve_only and getattr(args, "sweep", False):
-            parser.error("--serve-only does not support sweeps")
-        from srtctl.core.overrides import parse_overrides
-
-        try:
-            overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
-        except ValueError as exc:
-            parser.error(str(exc))
 
     if args.command in ("dsight", "dashboard"):
         from srtctl.dsight.cli import run as run_dashboard
@@ -2652,6 +2639,8 @@ def _run():
 
     json_mode = bool(getattr(args, "json_output", False))
     render_dir: Path | None = getattr(args, "render_dir", None)
+    mock_mode = bool(getattr(args, "mock_mode", False))
+    serve_only = bool(getattr(args, "serve_only", False))
 
     # Always rebind the module console on each invocation so json-mode prose
     # goes to stderr and non-json prose returns to stdout. Save the original
@@ -2675,7 +2664,6 @@ def _run():
     )
 
     global _active_overrides
-    _active_overrides = [override.render() for override in overrides]
 
     _mock_patch_teardowns: list = []
     if mock_mode:
@@ -2854,6 +2842,17 @@ def _run():
     tags = [t.strip() for t in (getattr(args, "tags", "") or "").split(",") if t.strip()] or None
 
     try:
+        if serve_only and mock_mode:
+            raise InvocationError("--serve-only cannot be combined with --mock")
+        if serve_only and getattr(args, "sweep", False):
+            raise InvocationError("--serve-only does not support sweeps")
+        from srtctl.core.overrides import parse_overrides
+
+        try:
+            overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
+        except ValueError as exc:
+            raise InvocationError(str(exc)) from exc
+        _active_overrides = [override.render() for override in overrides]
         # Supports path:selector format for overrides
         config_path, selector = parse_config_arg(args.config)
         with (
