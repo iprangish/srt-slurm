@@ -603,7 +603,7 @@ Values that were not observed are omitted, never `null`.
 | `setup_incomplete` | The srtctl installation is missing required binaries. |
 | `preflight_failed` | Pre-submit checks of model, container or telemetry paths failed. |
 | `sbatch_rejected` | `sbatch` refused the job; `subcode` names the Slurm error when recognised. |
-| `submission_failed` | Submission failed for another reason. |
+| `submission_failed` | Submission failed for another reason, including `sbatch` exiting 0 without printing a job ID. Slurm may still have queued that job; `cause.message` holds what `sbatch` printed. |
 | `job_preparation_failed` | The job was accepted but preparing its output directory failed. |
 | `sbatch_archive_failed` | The job was accepted but archiving its sbatch script failed. |
 | `metadata_write_failed` | The job was accepted but writing its metadata file failed. |
