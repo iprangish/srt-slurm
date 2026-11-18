@@ -620,7 +620,7 @@ For failures inside the running job, see [Failure Records](failure-records.md).
 | `2` | Invalid invocation (a command-line error, a bad `--set`, an unsupported flag combination or a missing recipe). |
 | `3` | At least one job was accepted and at least one failure was reported. Accepted jobs may be queued or running; the `accepted` records list them. |
 
-`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed, and a file that cannot be written only prints a warning to stderr. Errors raised by argument parsing itself (unknown flag, missing `-f`) happen before the path is known, so under `--json` they are reported only on stdout.
+`--failures-file PATH` appends every failure record of the run to `PATH` as JSON lines, with or without `--json`; the parent directory is created if needed, and a file that cannot be written only prints a warning to stderr. Errors raised by argument parsing itself (unknown flag, missing `-f`) happen before the flags are known, so they are reported only as the usage message on stderr, with exit code `2` and no record.
 
 ### Reading the output as a client
 
