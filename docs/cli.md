@@ -577,7 +577,7 @@ The MCP server (`srtctl-mcp`, stdio by default, `SRTCTL_MCP_TRANSPORT=streamable
 - `error`: a failure record, described below.
 - `no-submissions`: nothing was submitted and nothing failed, for example an empty directory.
 
-Without `--json` the same facts are printed as prose, one line per failure (`Error [code]: message`), so the information shown and the exit code never depend on the flag.
+Without `--json` the same facts are printed as prose, one line per failure (`Error [code]: message`), so the information shown and the exit code never depend on the flag. Other commands that load recipes, such as `dry-run` and `render`, print the same `Error [code]: message` line but write no records and keep their exit codes.
 
 Every record about a submission carries `submission_index` (1-based) and its identity: `recipe_path` for a file, `parameters` for a sweep point, `variant` for an override variant. A directory run continues past a failing file, except that `setup_incomplete` aborts it; a sweep or an override file stops at its first failing submission.
 
