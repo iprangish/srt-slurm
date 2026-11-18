@@ -408,10 +408,10 @@ class ServiceStageMixin:
             )
         except ProcessDied:
             raise SrtFailure(
-                FailureCode.INFRA_SERVICE_FAILED,
+                FailureCode.WORKER_FAILED,
                 f"services[{service.name}] exited with code {proc.exit_code} on {proc.node} before its readiness "
                 f"probe passed ({readiness.describe()}); see {proc.log_file}",
-                cause=Cause(producer=service.name, return_code=proc.exit_code),
+                cause=Cause(producer=proc.name, return_code=proc.exit_code),
             ) from None
         if not ready:
             raise SrtFailure(

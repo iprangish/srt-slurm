@@ -15,6 +15,7 @@ import yaml
 from marshmallow import ValidationError
 
 from srtctl.cli.do_sweep import SweepOrchestrator
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure
 from srtctl.core.readiness import ProcessDied
 from srtctl.core.runtime import Nodes, RuntimeContext
 from srtctl.core.schema import SrtConfig
@@ -470,9 +471,11 @@ def test_readiness_fails_fast_when_the_process_dies(tmp_path: Path) -> None:
         patch(SRUN, return_value=dead),
         patch(HOST_IP, return_value="10.0.0.10"),
         patch(WAIT, side_effect=ProcessDied("gone")),
-        pytest.raises(RuntimeError, match="exited with code 127 .* before its readiness probe passed"),
+        pytest.raises(SrtFailure, match="exited with code 127 .* before its readiness probe passed") as excinfo,
     ):
         _orchestrator(config, tmp_path).start_services("after_frontend")
+    assert excinfo.value.code is FailureCode.WORKER_FAILED
+    assert excinfo.value.cause == Cause(producer="service_a", return_code=127)
 
 
 def test_signal_during_readiness_wait_terminates_started(tmp_path: Path) -> None:

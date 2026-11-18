@@ -107,7 +107,7 @@ class BenchmarkStageMixin:
     runtime: "RuntimeContext"
     benchmark_child_reaped: bool | None = None
     benchmark_child_allows_window_mutation: bool | None = None
-    failures: FailureLog = FailureLog.disabled()
+    failures: FailureLog
 
     @property
     def endpoints(self) -> list["Endpoint"]:

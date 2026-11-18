@@ -15,6 +15,7 @@ from srtctl.cli import submit as submit_cli
 from srtctl.cli.do_sweep import SweepOrchestrator
 from srtctl.cli.mixins.benchmark_stage import BenchmarkStageMixin
 from srtctl.core.config import load_config, resolve_config_with_defaults
+from srtctl.core.failure_log import FailureLog
 from srtctl.core.runtime import Nodes, RuntimeContext
 from srtctl.core.schema import SrtConfig
 from srtctl.core.status import JobStage, JobStatus
@@ -77,6 +78,7 @@ def test_serve_only_is_forwarded_to_the_slurm_orchestrator(monkeypatch, tmp_path
 class _ServeOnlyHarness(BenchmarkStageMixin):
     def __init__(self, log_dir: Path) -> None:
         self.serve_only = True
+        self.failures = FailureLog.disabled()
         # Expand the 2.0 engine:/roles: vocabularies into the internal fields the
         # marshmallow schema reads; the dict is deep-copied, CONFIG is untouched.
         self.config = SrtConfig.Schema().load(resolve_config_with_defaults(CONFIG, None))
