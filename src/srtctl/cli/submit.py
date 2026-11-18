@@ -15,7 +15,6 @@ Usage:
 
 import argparse
 import contextlib
-import io
 import json
 import logging
 import os
@@ -28,7 +27,7 @@ import tempfile
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NoReturn, cast
 
 import yaml
 from marshmallow import ValidationError
@@ -2191,9 +2190,16 @@ def cache_inputs_cmd(
     return exit_code
 
 
+class _ArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        if _report.active:
+            _report.fail(InvocationError(message))
+        super().error(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The `srtctl` argument parser; building it has no side effects (docs/cli-reference.md is rendered from it)."""
-    parser = argparse.ArgumentParser(
+    parser = _ArgumentParser(
         prog="srtctl",
         description="srtctl - SLURM job submission",
         epilog="""Examples:
@@ -2602,22 +2608,6 @@ def main():
         _report = ApplyReport()
 
 
-@contextlib.contextmanager
-def _report_usage_errors(report: ApplyReport):
-    """Echo argparse's stderr and, when `report` is active, record its usage error as invocation_invalid."""
-    captured = io.StringIO()
-    try:
-        with contextlib.redirect_stderr(captured):
-            yield
-    except SystemExit as exc:
-        if exc.code == 2 and report.active:
-            message = captured.getvalue().strip().split(": error: ", 1)[-1]
-            report.fail(InvocationError(message))
-        raise
-    finally:
-        sys.stderr.write(captured.getvalue())
-
-
 def _run():
     # If no args at all, launch interactive mode
     if len(sys.argv) == 1:
@@ -2628,10 +2618,7 @@ def _run():
     setup_logging()
 
     parser = build_parser()
-    with _report_usage_errors(
-        ApplyReport(active=sys.argv[1:2] == ["apply"], json_out=sys.stdout if "--json" in sys.argv else None)
-    ):
-        args = parser.parse_args()
+    args = parser.parse_args()
 
     if args.command in ("dsight", "dashboard"):
         from srtctl.dsight.cli import run as run_dashboard
@@ -2666,15 +2653,14 @@ def _run():
 
     from srtctl.core.overrides import parse_overrides
 
-    with _report_usage_errors(_report):
-        if serve_only and mock_mode:
-            parser.error("--serve-only cannot be combined with --mock")
-        if serve_only and getattr(args, "sweep", False):
-            parser.error("--serve-only does not support sweeps")
-        try:
-            overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
-        except ValueError as exc:
-            parser.error(str(exc))
+    if serve_only and mock_mode:
+        parser.error("--serve-only cannot be combined with --mock")
+    if serve_only and getattr(args, "sweep", False):
+        parser.error("--serve-only does not support sweeps")
+    try:
+        overrides = parse_overrides(getattr(args, "set_overrides", None), getattr(args, "unset_overrides", None))
+    except ValueError as exc:
+        parser.error(str(exc))
     global _active_overrides
     _active_overrides = [override.render() for override in overrides]
 

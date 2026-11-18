@@ -256,10 +256,17 @@ def _fail_preflight_on_call(number: int):
     return patch("srtctl.cli.submit._assert_preflight_passed", side_effect=check)
 
 
+@pytest.mark.parametrize("json_mode", [True, False])
+def test_argparse_error_is_prose_only(monkeypatch, tmp_path, capsys, json_mode):
+    assert _apply(monkeypatch, tmp_path, json_mode=json_mode, args=("--bogus",)) == 2
+    captured = capsys.readouterr()
+    assert "unrecognized arguments: --bogus" in captured.err
+    assert captured.out == ""
+
+
 @pytest.mark.parametrize(
     ("args", "message"),
     [
-        (("--bogus",), "unrecognized arguments"),
         (("--set", "novalue"), "KEY=VALUE"),
         (("--set", "a..b=1"), "empty segment"),
     ],
