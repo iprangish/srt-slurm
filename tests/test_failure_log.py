@@ -108,6 +108,29 @@ def _registry() -> ProcessRegistry:
     return registry
 
 
+def test_supporting_service_process_failure_is_infra_service_failed(tmp_path):
+    registry = _registry()
+    registry.add_process(
+        ManagedProcess(
+            name="service_nats",
+            popen=SimpleNamespace(pid=1, poll=lambda: 1),
+            failure_code=FailureCode.INFRA_SERVICE_FAILED,
+        )
+    )
+    registry.record_failure("service_nats")
+    registry.record_failure("decode_0")
+    log = FailureLog(tmp_path, slurm_job_id="42", restart_count=0)
+    log.registry = registry
+
+    log.flush_process_failures()
+
+    records = _lines(tmp_path / "failures.jsonl")
+    assert [(r["code"], r["cause"]["producer"]) for r in records] == [
+        ("infra_service_failed", "service_nats"),
+        ("worker_failed", "decode_0"),
+    ]
+
+
 def test_process_failures_written_once_in_detection_order(tmp_path):
     registry = _registry()
     registry.record_failure("decode_0", "Rank0 Task exit code: 1")
@@ -139,11 +162,13 @@ def test_registry_failures_detail_prefers_fatal_line_then_tail(tmp_path):
     registry.record_failure("c")
 
     assert registry.failures(tail_lines=2) == [
-        ("a", 3, "fatal marker"),
-        ("b", 3, "line 3\nline 4"),
-        ("c", 3, ""),
+        ("a", FailureCode.WORKER_FAILED, 3, "fatal marker"),
+        ("b", FailureCode.WORKER_FAILED, 3, "line 3\nline 4"),
+        ("c", FailureCode.WORKER_FAILED, 3, ""),
     ]
-    assert registry.failures(skip={"a", "c"}) == [("b", 3, "line 0\nline 1\nline 2\nline 3\nline 4")]
+    assert registry.failures(skip={"a", "c"}) == [
+        ("b", FailureCode.WORKER_FAILED, 3, "line 0\nline 1\nline 2\nline 3\nline 4")
+    ]
 
 
 def test_signal_hook_runs_once_before_cleanup(restore_signal_handlers):

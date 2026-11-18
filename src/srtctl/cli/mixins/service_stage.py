@@ -390,6 +390,7 @@ class ServiceStageMixin:
             terminate_timeout=SERVICE_TERMINATE_TIMEOUT_SECONDS,
             step_name=step_name,
             shutdown_tier=_SHUTDOWN_TIER[service.effective_start],
+            failure_code=FailureCode.INFRA_SERVICE_FAILED,
         )
 
     @staticmethod
@@ -408,7 +409,7 @@ class ServiceStageMixin:
             )
         except ProcessDied:
             raise SrtFailure(
-                FailureCode.WORKER_FAILED,
+                FailureCode.INFRA_SERVICE_FAILED,
                 f"services[{service.name}] exited with code {proc.exit_code} on {proc.node} before its readiness "
                 f"probe passed ({readiness.describe()}); see {proc.log_file}",
                 cause=Cause(producer=proc.name, return_code=proc.exit_code),

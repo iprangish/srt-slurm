@@ -8,7 +8,7 @@ import logging
 import os
 from pathlib import Path
 
-from srtctl.contract.failures import Cause, FailureCode, SrtFailure
+from srtctl.contract.failures import Cause, SrtFailure
 from srtctl.core.launcher import get_launcher
 from srtctl.core.processes import ProcessRegistry
 from srtctl.core.schema import ReportingConfig, ReportingFailuresConfig
@@ -89,10 +89,10 @@ class FailureLog:
         """Write a record per newly failed process; return whether any process failed."""
         if not self._enabled or self.registry is None:
             return False
-        for name, exit_code, detail in self.registry.failures(skip=self._written_processes):
+        for name, code, exit_code, detail in self.registry.failures(skip=self._written_processes):
             self._written_processes.add(name)
             cause = Cause(producer=name, return_code=exit_code, message=detail or None)
-            self.write(SrtFailure(FailureCode.WORKER_FAILED, f"Process {name} failed", cause=cause))
+            self.write(SrtFailure(code, f"Process {name} failed", cause=cause))
         return bool(self._written_processes)
 
     def write_unless_process_failed(self, failure: SrtFailure) -> None:

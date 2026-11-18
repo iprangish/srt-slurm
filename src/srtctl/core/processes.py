@@ -23,6 +23,7 @@ from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from srtctl.contract.failures import FailureCode
 from srtctl.core.topology import Process
 
 logger = logging.getLogger(__name__)
@@ -119,6 +120,9 @@ class ManagedProcess:
     # until the supervisor gives up and clears the flag.
     supervised: bool = False
     worker_assignments: tuple[Process, ...] = ()
+    # The code a failure of this process is recorded under: the inference stack under test by default,
+    # infra_service_failed for the services that support it.
+    failure_code: FailureCode = FailureCode.WORKER_FAILED
     _stopped_via_step: bool = field(default=False, init=False, repr=False)
     _stop_deadline: float | None = field(default=None, init=False, repr=False)
     _stop_escalations: int = field(default=0, init=False, repr=False)
@@ -383,6 +387,7 @@ class ProcessRegistry:
                     signal_full=proc.signal_full,
                     fatal_log_patterns=proc.fatal_log_patterns,
                     worker_assignments=proc.worker_assignments,
+                    failure_code=proc.failure_code,
                 )
             self.add_process(proc)
 
@@ -513,8 +518,10 @@ class ProcessRegistry:
 
         logger.error("=" * 60)
 
-    def failures(self, tail_lines: int = 50, skip: Collection[str] = ()) -> list[tuple[str, int | None, str]]:
-        """Recorded failed processes not in ``skip``, in detection order, as ``(name, exit_code, detail)``."""
+    def failures(
+        self, tail_lines: int = 50, skip: Collection[str] = ()
+    ) -> list[tuple[str, FailureCode, int | None, str]]:
+        """Recorded failed processes not in ``skip``, in detection order, as ``(name, code, exit_code, detail)``."""
         with self._lock:
             details = []
             for name in self._failed_processes:
@@ -525,7 +532,7 @@ class ProcessRegistry:
                 if not detail and proc.log_file and proc.log_file.exists():
                     with contextlib.suppress(OSError):
                         detail = "\n".join(_log_tail(proc.log_file, tail_lines))
-                details.append((name, proc.exit_code, detail))
+                details.append((name, proc.failure_code, proc.exit_code, detail))
             return details
 
     def get_process(self, name: str) -> ManagedProcess | None:

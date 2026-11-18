@@ -474,7 +474,7 @@ def test_readiness_fails_fast_when_the_process_dies(tmp_path: Path) -> None:
         pytest.raises(SrtFailure, match="exited with code 127 .* before its readiness probe passed") as excinfo,
     ):
         _orchestrator(config, tmp_path).start_services("after_frontend")
-    assert excinfo.value.code is FailureCode.WORKER_FAILED
+    assert excinfo.value.code is FailureCode.INFRA_SERVICE_FAILED
     assert excinfo.value.cause == Cause(producer="service_a", return_code=127)
 
 
