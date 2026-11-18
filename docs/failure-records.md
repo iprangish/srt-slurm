@@ -24,9 +24,9 @@ Records are appended in the order the failures were observed, so the first recor
 | --- | --- |
 | `job_preparation_failed` | The recipe file passed to the coordinator does not exist. |
 | `recipe_invalid` | The recipe fails to load or validate inside the job. |
-| `infra_service_failed` | `host_setup` commands fail on a node, model staging fails, or a service step exits non-zero or times out. `cause.producer` is `host_setup`, `stage_model`, or the step name. |
+| `infra_service_failed` | Something that supports the inference stack failed: a `host_setup` command, model staging, a service's clone or build step, or a `services[]` process (including the implicit etcd and NATS) that exits, during startup or later. `cause.producer` is `host_setup`, `stage_model`, or the step or process name. |
 | `telemetry_required_failed` | `telemetry.required` is set and clock-sync, power telemetry or its finalization fails. |
-| `worker_failed` | A managed process (worker, frontend or service) exits abnormally, one record per process (`cause.producer` is the process name, `cause.return_code` its exit code); or a DWDP worker finds no rank-0 endpoint to rendezvous with, which has no process cause. |
+| `worker_failed` | A process of the inference stack under test (a worker, or the frontend or router) exits abnormally or logs a fatal error, one record per process (`cause.producer` is the process name, `cause.return_code` its exit code); or a DWDP worker finds no rank-0 endpoint to rendezvous with, which has no process cause. |
 | `health_check_timeout` | Server, frontend, worker or `services[]` readiness did not pass in time. For the server-health waits it is skipped when a process failure already explains it. |
 | `benchmark_failed` | The benchmark or eval-only run exited non-zero (`cause.producer` names it, with `cause.return_code`); or a terminal service step exits non-zero, one record per step. Skipped when a process failure explains it. |
 | `terminated` | The coordinator received a shutdown signal; `subcode` is `SIGTERM` or `SIGINT`. Any process failure that preceded the signal is recorded first. |
