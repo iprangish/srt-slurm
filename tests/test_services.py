@@ -478,6 +478,20 @@ def test_readiness_fails_fast_when_the_process_dies(tmp_path: Path) -> None:
     assert excinfo.value.cause == Cause(producer="service_a", return_code=127)
 
 
+def test_service_processes_carry_their_failure_code(tmp_path: Path) -> None:
+    config = _load(
+        "services:\n"
+        "  - name: train\n    command: [/bin/true]\n    terminal: true\n    critical: true\n"
+        "  - name: sidecar\n    command: [/bin/true]\n    critical: true\n"
+    )
+    with patch(SRUN, side_effect=lambda **kwargs: _proc()), patch(HOST_IP, return_value="10.0.0.10"):
+        procs = _orchestrator(config, tmp_path).start_services("after_frontend")
+    assert {proc.name: proc.failure_code for proc in procs} == {
+        "service_train": FailureCode.BENCHMARK_FAILED,
+        "service_sidecar": FailureCode.INFRA_SERVICE_FAILED,
+    }
+
+
 def test_signal_during_readiness_wait_terminates_started(tmp_path: Path) -> None:
     # The SIGTERM handler raises SystemExit inside whatever the orchestrator is doing;
     # the stage must still tear down what it launched.

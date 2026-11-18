@@ -390,7 +390,7 @@ class ServiceStageMixin:
             terminate_timeout=SERVICE_TERMINATE_TIMEOUT_SECONDS,
             step_name=step_name,
             shutdown_tier=_SHUTDOWN_TIER[service.effective_start],
-            failure_code=FailureCode.INFRA_SERVICE_FAILED,
+            failure_code=FailureCode.BENCHMARK_FAILED if service.terminal else FailureCode.INFRA_SERVICE_FAILED,
         )
 
     @staticmethod
