@@ -117,8 +117,11 @@ class ApplyReport:
     def _emit(self, record: dict[str, Any], *, failure: bool = False) -> None:
         line = json.dumps(record, default=str)
         if self.json_out is not None:
-            self.json_out.write(line + "\n")
-            self.json_out.flush()
+            try:
+                self.json_out.write(line + "\n")
+                self.json_out.flush()
+            except OSError as e:
+                print(f"Could not write record to stdout: {e}", file=sys.stderr)
         if failure and self.failures_file is not None:
             try:
                 self.failures_file.parent.mkdir(parents=True, exist_ok=True)

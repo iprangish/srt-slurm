@@ -106,3 +106,24 @@ def test_finish_emits_no_submissions_only_when_empty():
     out.seek(0)
     report.finish()
     assert out.getvalue() == ""
+
+
+class _ClosedPipe(io.StringIO):
+    def write(self, s: str) -> int:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_closed_stdout_never_interrupts_the_run(tmp_path, capsys):
+    failures_file = tmp_path / "failures.jsonl"
+    report = ApplyReport(active=True, json_out=_ClosedPipe(), failures_file=failures_file)
+    prepared = False
+
+    with pytest.raises(SrtFailure), report.item(recipe_path="r.yaml"):
+        report.accepted("42", "job", tmp_path / "42")
+        prepared = True
+        raise OSError("disk full")
+
+    assert prepared
+    assert json.loads(failures_file.read_text())["slurm_job_id"] == "42"
+    assert report.exit_code == 3
+    assert "Could not write record to stdout" in capsys.readouterr().err
