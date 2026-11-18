@@ -3007,7 +3007,10 @@ def _run():
             console.print(_report.fail(e).human_line(), markup=False, highlight=False)
             sys.exit(_report.exit_code)
         restore_console()
-        console.print(f"[bold red]Error:[/] {e}")
+        if isinstance(e, SrtFailure):
+            console.print(e.human_line(), markup=False, highlight=False)
+        else:
+            console.print(f"[bold red]Error:[/] {e}")
         sys.exit(1)
 
     # Mock-mode post-submit: spawn the detached orchestrator worker so the

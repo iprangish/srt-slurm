@@ -377,6 +377,13 @@ def test_dry_run_directory_with_bad_file_still_exits_0(monkeypatch, tmp_path):
     assert _apply(monkeypatch, tmp_path, command="dry-run", json_mode=False, target=directory) == 0
 
 
+def test_dry_run_failure_shows_the_code_for_files_and_directories(monkeypatch, tmp_path, capsys):
+    directory = _recipes(tmp_path, b="name: [broken\n")
+    assert _apply(monkeypatch, tmp_path, command="dry-run", json_mode=False, target=directory / "b.yaml") == 1
+    assert _apply(monkeypatch, tmp_path, command="dry-run", json_mode=False, target=directory) == 0
+    assert capsys.readouterr().out.count("Error [recipe_invalid]") == 2
+
+
 def test_set_parse_error_reaches_failures_file(monkeypatch, tmp_path):
     path = tmp_path / "f.jsonl"
     assert _apply(monkeypatch, tmp_path, args=("--set", "novalue", "--failures-file", str(path))) == 2
