@@ -24,7 +24,7 @@ Records are appended in the order the failures were observed, so the first recor
 | --- | --- |
 | `job_preparation_failed` | The recipe file passed to the coordinator does not exist. |
 | `recipe_invalid` | The recipe fails to load or validate inside the job. |
-| `infra_service_failed` | `host_setup` commands fail on a node, model staging fails, a service step exits non-zero or times out, or a `services[]` entry exits before it is ready. `cause.producer` is `host_setup`, `stage_model`, or the step or service name. |
+| `infra_service_failed` | `host_setup` commands fail on a node, model staging fails, or a service step exits non-zero or times out. `cause.producer` is `host_setup`, `stage_model`, or the step name. |
 | `telemetry_required_failed` | `telemetry.required` is set and clock-sync, power telemetry or its finalization fails. |
 | `worker_failed` | A managed process (worker, frontend or service) exits abnormally, one record per process (`cause.producer` is the process name, `cause.return_code` its exit code); or a DWDP worker finds no rank-0 endpoint to rendezvous with, which has no process cause. |
 | `health_check_timeout` | Server, frontend, worker or `services[]` readiness did not pass in time. For the server-health waits it is skipped when a process failure already explains it. |
