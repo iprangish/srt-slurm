@@ -35,7 +35,7 @@ from srtctl.cli.mixins import (
     TelemetryStageMixin,
     WorkerStageMixin,
 )
-from srtctl.contract.failures import Cause, FailureCode, SrtFailure, as_failure
+from srtctl.contract.failures import Cause, FailureCode, SrtFailure, as_failure, reraise_as
 from srtctl.core.config import load_config
 from srtctl.core.failure_log import FailureLog
 from srtctl.core.health import wait_for_port
@@ -1038,11 +1038,8 @@ def main():
             failures.write(SrtFailure(FailureCode.JOB_PREPARATION_FAILED, message))
             sys.exit(1)
 
-        try:
+        with reraise_as(FailureCode.RECIPE_INVALID, Exception):
             config = load_config(config_path)
-        except Exception as e:
-            failures.write(SrtFailure(FailureCode.RECIPE_INVALID, str(e)))
-            raise
         failures.configure(config.reporting)
 
         # Check for setup_script override from CLI (passed via env var)

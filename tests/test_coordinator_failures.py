@@ -324,13 +324,17 @@ def test_early_exit_missing_config_rotates_then_records(tmp_path, monkeypatch):
     assert (record["code"], record["slurm_job_id"]) == ("job_preparation_failed", "777")
 
 
-def test_early_exit_load_failure_records_recipe_invalid(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("recipe_text", "code"),
+    [("schema: 2\nname: incomplete\n", "recipe_invalid"), ("name: pre-2.0\n", "recipe_schema_unsupported")],
+)
+def test_early_exit_load_failure_keeps_its_code(tmp_path, monkeypatch, recipe_text, code):
     recipe = tmp_path / "recipe.yaml"
-    recipe.write_text("name: incomplete\n")
+    recipe.write_text(recipe_text)
 
     log_dir = _main(tmp_path, monkeypatch, recipe)
 
-    assert _codes(log_dir) == ["recipe_invalid"]
+    assert _codes(log_dir) == [code]
 
 
 def test_failure_before_run_records_unknown(tmp_path, monkeypatch):
