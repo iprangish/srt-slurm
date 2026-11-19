@@ -14,6 +14,8 @@ Writing never raises: if the file cannot be written or rotated, a warning is log
 
 Each record has `schema_version`, `status` (`error`), `code`, optional `subcode`, `error`, and optional `cause` and `issues`, as described in the CLI guide. The coordinator identifies the job attempt with `slurm_job_id` and `restart_count` (`SLURM_RESTART_COUNT`) instead of `output_dir`. Values that were not observed are omitted.
 
+For a process failure, `cause.producer` is the process name as it appears in the sweep log; a worker's name includes its node, such as `agg_0_<node>`. `cause.message` is the fatal line the process logged or, failing that, the last 50 lines of its log.
+
 ## Ordering
 
 Records are appended in the order the failures were observed, so the first record is the primary cause. Later records are consequences: for example, `infra_service_failed` for a NATS service that exited, followed by `worker_failed` for each worker that failed without it, or the shutdown signal that ended the job.
