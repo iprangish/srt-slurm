@@ -32,7 +32,7 @@ Records are appended in the order the failures were observed, so the first recor
 | `worker_failed` | A process of the inference stack under test (a worker, or the frontend or router) exits abnormally or logs a fatal error, one record per process (`cause.producer` is the process name, `cause.return_code` its exit code); or a DWDP worker finds no rank-0 endpoint to rendezvous with, which has no process cause. |
 | `health_check_timeout` | Server, frontend, worker or `services[]` readiness did not pass in time. Skipped when a process failure explains it. |
 | `benchmark_failed` | The benchmark or eval-only run exited non-zero (`cause.producer` names it, with `cause.return_code`); or a `terminal` service, which is the job's run, exits non-zero, one record per process. Skipped when another process failure explains it. |
-| `terminated` | The coordinator received a shutdown signal; `subcode` is `SIGTERM` or `SIGINT`. Any process failure that preceded the signal is recorded first. |
+| `terminated` | The coordinator received a shutdown signal, for example from `scancel` or the time limit; `subcode` is `SIGTERM` or `SIGINT`. Any process failure that preceded the signal is recorded first. |
 | `unknown` | An unclassified exception, or a non-zero exit with no earlier record. |
 
 Where a process failure already explains a later failure, the later failure is not written.
