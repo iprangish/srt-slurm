@@ -409,7 +409,7 @@ class ServiceStageMixin:
             )
         except ProcessDied:
             raise SrtFailure(
-                FailureCode.INFRA_SERVICE_FAILED,
+                proc.failure_code,
                 f"services[{service.name}] exited with code {proc.exit_code} on {proc.node} before its readiness "
                 f"probe passed ({readiness.describe()}); see {proc.log_file}",
                 cause=Cause(producer=proc.name, return_code=proc.exit_code),
@@ -541,6 +541,7 @@ class ServiceStageMixin:
             # Belt and braces: the registry already tracks these, but terminate
             # here too so a failure inside this stage never depends on the caller.
             for proc in started:
+                proc.critical = False  # its exit is this failure's consequence, not a cause
                 proc.terminate()
             raise
         return started

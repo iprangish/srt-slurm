@@ -532,7 +532,9 @@ class ProcessRegistry:
                 if not detail and proc.log_file and proc.log_file.exists():
                     with contextlib.suppress(OSError):
                         detail = "\n".join(_log_tail(proc.log_file, tail_lines))
-                details.append((name, proc.failure_code, proc.exit_code, detail))
+                # A log-line failure was detected while the step ran; its exit code is cleanup's.
+                exit_code = None if name in self._failure_reasons else proc.exit_code
+                details.append((name, proc.failure_code, exit_code, detail))
             return details
 
     def get_process(self, name: str) -> ManagedProcess | None:
@@ -575,18 +577,22 @@ def setup_signal_handlers(
     Args:
         stop_event: Event to signal shutdown
         registry: ProcessRegistry to cleanup on signal
-        on_signal: Called with the signal name on the first signal only, before cleanup
+        on_signal: Called with the signal name before cleanup; later signals are ignored
     """
 
     def signal_handler(signum, frame):
         sig_name = signal.Signals(signum).name
+        # A time limit signals every process, and uv and the batch script forward it again.
+        if registry.received_signal is not None:
+            logger.warning("Received signal %s again; shutdown already in progress", sig_name)
+            return
+        registry.received_signal = sig_name
         logger.warning("Received signal %s, initiating cleanup...", sig_name)
-        if on_signal is not None and registry.received_signal is None:
+        if on_signal is not None:
             try:
                 on_signal(sig_name)
             except Exception:
                 logger.exception("Failure hook raised; continuing shutdown")
-        registry.received_signal = sig_name
         stop_event.set()
         registry.cleanup()
         sys.exit(1)

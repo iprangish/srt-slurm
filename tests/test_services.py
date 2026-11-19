@@ -381,7 +381,8 @@ def test_declared_order_is_launch_order(tmp_path: Path) -> None:
 
 def test_readiness_gate_blocks_and_failure_terminates_started(tmp_path: Path) -> None:
     config = _load(
-        "services:\n  - name: a\n    command: [/bin/true]\n    readiness:\n      port: 9000\n      timeout_seconds: 5\n"
+        "services:\n  - name: a\n    command: [/bin/true]\n    critical: true\n"
+        "    readiness:\n      port: 9000\n      timeout_seconds: 5\n"
     )
     orchestrator = _orchestrator(config, tmp_path)
     with (
@@ -409,6 +410,8 @@ def test_readiness_gate_blocks_and_failure_terminates_started(tmp_path: Path) ->
     # Registered before the readiness wait, so a signal during the wait still finds it.
     (registered,) = [call.args[0] for call in registry.add_process.call_args_list]
     assert registered.popen is popen
+    # The monitor must not record the stage's own teardown as the failure.
+    assert registered.critical is False
 
 
 WORKERS_PROBED = (
@@ -461,9 +464,13 @@ def test_one_instance_failing_readiness_terminates_every_instance(tmp_path: Path
     assert [call.args[0].popen for call in registry.add_process.call_args_list] == popens
 
 
-def test_readiness_fails_fast_when_the_process_dies(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("terminal", "code"), [(False, FailureCode.INFRA_SERVICE_FAILED), (True, FailureCode.BENCHMARK_FAILED)]
+)
+def test_readiness_fails_fast_when_the_process_dies(tmp_path: Path, terminal: bool, code: FailureCode) -> None:
     config = _load(
-        "services:\n  - name: a\n    command: [/bin/true]\n    readiness:\n      port: 9000\n      timeout_seconds: 600\n"
+        f"services:\n  - name: a\n    command: [/bin/true]\n    terminal: {str(terminal).lower()}\n"
+        "    readiness:\n      port: 9000\n      timeout_seconds: 600\n"
     )
     dead = _proc()
     dead.poll.return_value = 127
@@ -474,7 +481,7 @@ def test_readiness_fails_fast_when_the_process_dies(tmp_path: Path) -> None:
         pytest.raises(SrtFailure, match="exited with code 127 .* before its readiness probe passed") as excinfo,
     ):
         _orchestrator(config, tmp_path).start_services("after_frontend")
-    assert excinfo.value.code is FailureCode.INFRA_SERVICE_FAILED
+    assert excinfo.value.code is code
     assert excinfo.value.cause == Cause(producer="service_a", return_code=127)
 
 

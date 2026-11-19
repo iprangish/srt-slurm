@@ -3,7 +3,6 @@
 
 """Failure records the in-job coordinator writes at its existing failure points."""
 
-import contextlib
 import json
 import os
 import signal
@@ -282,12 +281,17 @@ def test_run_eval_failure_writes_nothing(tmp_path, monkeypatch):
 
 
 def test_signal_records_terminated_once_with_subcode(tmp_path, restore_signal_handlers):
-    def two_signals(self):
-        with contextlib.suppress(SystemExit):
-            signal.raise_signal(signal.SIGTERM)
-        signal.raise_signal(signal.SIGINT)
+    record_signal = SweepOrchestrator._record_signal
 
-    with patch.object(SweepOrchestrator, "_print_connection_info", two_signals), pytest.raises(SystemExit):
+    def record_then_signal_again(self, sig):
+        record_signal(self, sig)
+        signal.raise_signal(signal.SIGINT)  # a forwarded copy arriving mid-shutdown
+
+    with (
+        patch.object(SweepOrchestrator, "_print_connection_info", lambda self: signal.raise_signal(signal.SIGTERM)),
+        patch.object(SweepOrchestrator, "_record_signal", record_then_signal_again),
+        pytest.raises(SystemExit),
+    ):
         _mock_sweep(tmp_path)
 
     (record,) = _records(tmp_path / "outputs" / "4242" / "logs")

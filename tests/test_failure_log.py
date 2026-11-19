@@ -162,7 +162,7 @@ def test_registry_failures_detail_prefers_fatal_line_then_tail(tmp_path):
     registry.record_failure("c")
 
     assert registry.failures(tail_lines=2) == [
-        ("a", FailureCode.WORKER_FAILED, 3, "fatal marker"),
+        ("a", FailureCode.WORKER_FAILED, None, "fatal marker"),  # 3 is cleanup's exit, not the cause
         ("b", FailureCode.WORKER_FAILED, 3, "line 3\nline 4"),
         ("c", FailureCode.WORKER_FAILED, 3, ""),
     ]
@@ -175,13 +175,17 @@ def test_signal_hook_runs_once_before_cleanup(restore_signal_handlers):
     order: list[str] = []
     registry = ProcessRegistry("1")
     registry.cleanup = lambda: order.append("cleanup")  # type: ignore[method-assign]
-    setup_signal_handlers(threading.Event(), registry, on_signal=lambda name: order.append(f"hook {name}"))
 
-    for _ in range(2):
-        with pytest.raises(SystemExit):
-            signal.raise_signal(signal.SIGTERM)
+    def hook(name: str) -> None:
+        order.append(f"hook {name}")
+        signal.raise_signal(signal.SIGTERM)  # a forwarded copy arrives while the first is handled
 
-    assert order == ["hook SIGTERM", "cleanup", "cleanup"]
+    setup_signal_handlers(threading.Event(), registry, on_signal=hook)
+    with pytest.raises(SystemExit):
+        signal.raise_signal(signal.SIGTERM)
+    signal.raise_signal(signal.SIGTERM)
+
+    assert order == ["hook SIGTERM", "cleanup"]
 
 
 def test_from_env_without_job_id_is_none(tmp_path, monkeypatch):

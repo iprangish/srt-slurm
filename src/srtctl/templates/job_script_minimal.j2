@@ -186,7 +186,8 @@ uv run --python 3.12 --no-dev --no-sync -m srtctl.cli.do_sweep "${OUTPUT_DIR}/{{
 SWEEP_PID=$!
 wait "${SWEEP_PID}"
 EXIT_CODE=$?
-while kill -0 "${SWEEP_PID}" 2>/dev/null; do
+# Above 128, a trapped signal cut the wait short; wait again for the orchestrator's own exit code.
+while [ "${EXIT_CODE}" -gt 128 ] && kill -0 "${SWEEP_PID}" 2>/dev/null; do
     wait "${SWEEP_PID}"
     EXIT_CODE=$?
 done
