@@ -1787,7 +1787,7 @@ def submit_directory(
             if isinstance(e, SrtFailure) and e.code is FailureCode.SETUP_INCOMPLETE:
                 raise
             if isinstance(e, SrtFailure):
-                console.print(Text.assemble(("  ❌ ", "bold red"), e.human_line()))
+                console.print(Text.assemble(("  ❌ ", "bold red"), e.human_line()), soft_wrap=True)
             else:
                 console.print(f"[bold red]  ❌ Error:[/] {e}")
             logger.debug("Full traceback:", exc_info=True)
@@ -2990,11 +2990,11 @@ def _run():
         _mock_patch_teardowns = []
         logger.debug("Full traceback:", exc_info=True)
         if _report.active:
-            console.print(_report.fail(e).human_line(), markup=False, highlight=False)
+            console.print(_report.fail(e).human_line(), markup=False, highlight=False, soft_wrap=True)
             sys.exit(_report.exit_code)
         restore_console()
         if isinstance(e, SrtFailure):
-            console.print(e.human_line(), markup=False, highlight=False)
+            console.print(e.human_line(), markup=False, highlight=False, soft_wrap=True)
         else:
             console.print(f"[bold red]Error:[/] {e}")
         sys.exit(1)

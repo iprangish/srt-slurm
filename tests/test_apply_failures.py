@@ -295,6 +295,13 @@ def test_bad_selector_and_missing_recipe_exit_2(monkeypatch, tmp_path, capsys, j
         assert "invocation_invalid" in out
 
 
+def test_prose_error_line_is_not_wrapped(monkeypatch, tmp_path, capsys):
+    missing = tmp_path / ("long-recipe-name-" * 8 + ".yaml")
+    assert _apply(monkeypatch, tmp_path, json_mode=False, target=missing) == 2
+    (line,) = [line for line in capsys.readouterr().out.splitlines() if "invocation_invalid" in line]
+    assert str(missing) in line
+
+
 def test_empty_stdin_exit_2(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(sys, "stdin", SimpleNamespace(read=lambda: ""))
     assert _apply(monkeypatch, tmp_path, target="-") == 2
