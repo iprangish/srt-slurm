@@ -597,7 +597,7 @@ In failure records, values that were not observed are omitted, never `null`.
 
 | Code | Raised when |
 | --- | --- |
-| `invocation_invalid` | The command line is wrong: unknown flag, bad `--set` or selector, missing recipe, empty stdin. |
+| `invocation_invalid` | The command line is wrong: bad `--set` or selector, unsupported flag combination, missing recipe, empty stdin. |
 | `recipe_invalid` | The recipe is not valid YAML or fails validation, or cannot run under the selected launcher. |
 | `recipe_schema_unsupported` | The recipe declares a schema this srtctl does not load. |
 | `cluster_config_invalid` | Reserved: nothing raises it yet. |
