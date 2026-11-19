@@ -178,8 +178,18 @@ cd "${SRTCTL_SOURCE}"
 # errors. The flock serializes only the venv init; the lock is released
 # before the actual sweep so jobs still run in parallel.
 flock -x "${UV_PROJECT_ENVIRONMENT}.lock" uv sync --python 3.12 --no-dev
-uv run --python 3.12 --no-dev --no-sync -m srtctl.cli.do_sweep "${OUTPUT_DIR}/{{ runtime_config_filename }}"{% if serve_only %} --serve-only{% endif %}
+# scancel signals only this shell: forward SIGTERM so the orchestrator can record it and clean up.
+# Ctrl-C (launcher: docker) already reaches the orchestrator; the INT trap only keeps this shell waiting.
+trap 'kill -TERM "${SWEEP_PID}" 2>/dev/null' TERM
+trap ':' INT
+uv run --python 3.12 --no-dev --no-sync -m srtctl.cli.do_sweep "${OUTPUT_DIR}/{{ runtime_config_filename }}"{% if serve_only %} --serve-only{% endif %} &
+SWEEP_PID=$!
+wait "${SWEEP_PID}"
 EXIT_CODE=$?
+while kill -0 "${SWEEP_PID}" 2>/dev/null; do
+    wait "${SWEEP_PID}"
+    EXIT_CODE=$?
+done
 set -e  # Re-enable exit-on-error
 
 echo ""

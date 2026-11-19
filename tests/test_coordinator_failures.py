@@ -5,9 +5,12 @@
 
 import contextlib
 import json
+import os
 import signal
+import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -17,6 +20,7 @@ import yaml
 
 from srtctl.cli import do_sweep
 from srtctl.cli.do_sweep import SweepOrchestrator
+from srtctl.cli.submit import generate_minimal_sbatch_script
 from srtctl.contract.failures import FailureCode, SrtFailure
 from srtctl.core.failure_log import FailureLog
 from srtctl.core.processes import ManagedProcess, ProcessRegistry
@@ -346,3 +350,55 @@ def test_failure_before_run_records_unknown(tmp_path, monkeypatch):
 
     (record,) = _records(log_dir)
     assert (record["code"], record["error"]) == ("unknown", "nodelist has 0 nodes")
+
+
+_STUB_COORDINATOR = """\
+import pathlib, signal, sys, time
+marker = pathlib.Path(sys.argv[1])
+signal.signal(signal.SIGTERM, lambda *_: (marker.write_text("SIGTERM"), sys.exit(7)))
+marker.write_text("started")
+time.sleep(30)
+"""
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX signals")
+def test_batch_script_forwards_sigterm_to_the_coordinator(tmp_path):
+    """scancel signals only the batch shell; the coordinator must still get SIGTERM to record it."""
+    marker = tmp_path / "marker"
+    (tmp_path / "coordinator.py").write_text(_STUB_COORDINATOR)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    stubs = {
+        "uv": f'[ "$1" = run ] && exec {sys.executable} {tmp_path}/coordinator.py {marker}\necho uv-stub',
+        "flock": "true",
+    }
+    for name, body in stubs.items():
+        (bin_dir / name).write_text(f"#!/bin/bash\n{body}\n")
+        (bin_dir / name).chmod(0o755)
+    config = SrtConfig(
+        name="test",
+        model=ModelConfig(path="/model", container="/container.sqsh", precision="fp8"),
+        resources=ResourceConfig(gpu_type="h100", gpus_per_node=8),
+        roles={"agg": RoleConfig(nodes=1)},
+    )
+    with patch(
+        "srtctl.cli.submit.get_srtslurm_setting", lambda key, *_: str(tmp_path) if key == "srtctl_root" else None
+    ):
+        script = generate_minimal_sbatch_script(config, tmp_path / "cfg.yaml", output_dir=tmp_path / "out")
+    (tmp_path / "job.sh").write_text(script)
+
+    job = subprocess.Popen(
+        ["bash", str(tmp_path / "job.sh")],
+        env={**os.environ, "SLURM_JOB_ID": "1"},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    deadline = time.monotonic() + 10
+    while not (marker.exists() and marker.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    job.send_signal(signal.SIGTERM)
+    out, _ = job.communicate(timeout=10)
+
+    assert marker.read_text() == "SIGTERM"
+    assert job.returncode == 7
+    assert "Sweep failed (exit code: 7)" in out
